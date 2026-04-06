@@ -136,13 +136,16 @@ export function renderAll(adminMode = false) {
   const mws = document.getElementById('media-week-select');
   if (mws) mws.value = String(config.CURRENT_WEEK);
   const sselBefore = document.getElementById('schedule-week-select');
-  const prevScheduleWeek = sselBefore && sselBefore.value && parseInt(sselBefore.value, 10) >= 1 && parseInt(sselBefore.value, 10) <= config.TOTAL_WEEKS
-    ? parseInt(sselBefore.value, 10) : config.CURRENT_WEEK;
+  const prevScheduleWeekVal = sselBefore?.value;
+  const prevScheduleWeek = (!prevScheduleWeekVal || prevScheduleWeekVal === 'all')
+    ? 'all'
+    : (parseInt(prevScheduleWeekVal, 10) >= 1 && parseInt(prevScheduleWeekVal, 10) <= config.TOTAL_WEEKS
+      ? parseInt(prevScheduleWeekVal, 10) : 'all');
   const teamFilterBefore = document.getElementById('schedule-team-filter');
   const teamFilterVal = teamFilterBefore?.value || null;
-  buildWeekDropdown('schedule-week-select', false);
+  buildWeekDropdown('schedule-week-select', true);
   const ssel = document.getElementById('schedule-week-select');
-  if (ssel) ssel.value = String(Math.min(config.TOTAL_WEEKS, Math.max(1, prevScheduleWeek)));
+  if (ssel) ssel.value = prevScheduleWeek === 'all' ? 'all' : String(Math.min(config.TOTAL_WEEKS, Math.max(1, prevScheduleWeek)));
   buildScheduleTeamFilter();
   const scheduleTeamFilter = document.getElementById('schedule-team-filter');
   if (scheduleTeamFilter && teamFilterVal) scheduleTeamFilter.value = teamFilterVal;
@@ -152,7 +155,9 @@ export function renderAll(adminMode = false) {
   renderStats();
   renderAwards(config.CURRENT_WEEK);
   renderScores('all');
-  renderSchedule(parseInt(ssel?.value || config.CURRENT_WEEK, 10), teamFilterVal || null);
+  const schedWeekVal = ssel?.value;
+  const schedFocusWeek = (!schedWeekVal || schedWeekVal === 'all') ? 'all' : parseInt(schedWeekVal, 10);
+  renderSchedule(schedFocusWeek, teamFilterVal || null);
   renderMedia(config.CURRENT_WEEK);
   renderAbout();
   renderDraft(adminMode);
@@ -189,13 +194,7 @@ export function renderHome() {
   ];
   const homeMatchups = document.getElementById('home-matchups');
   const homeAwards = document.getElementById('home-awards');
-  if (homeMatchups) homeMatchups.innerHTML = games.map((g, i) => {
-    const played = g.s1 !== '' && g.s2 !== '';
-    const s1 = parseInt(g.s1 || 0), s2 = parseInt(g.s2 || 0), w1 = played && s1 > s2, w2 = played && s2 > s1;
-    const gameId = g.gameId || '';
-    const boxScoreBtn = gameId ? `<button type="button" class="schedule-expand-btn" data-game-id="${gameId}" style="margin-top:0.5rem;background:transparent;border:none;color:#c8a84b;font-size:0.8rem;cursor:pointer;padding:0;">View box score</button>` : '';
-    return `<div class="matchup-card"><div class="matchup-game-label">Game ${g.game || i + 1}</div><div class="matchup-row"><span class="matchup-team ${w1 ? 'winner' : ''}">${g.t1}</span><span class="matchup-score ${w1 ? 'winner' : ''}">${played ? g.s1 : 'TBD'}</span></div><div class="matchup-mid"></div><div class="matchup-row"><span class="matchup-team ${w2 ? 'winner' : ''}">${g.t2}</span><span class="matchup-score ${w2 ? 'winner' : ''}">${played ? g.s2 : 'TBD'}</span></div><div class="winner-tag" style="${played ? '' : 'color:#c8c0b0;font-style:italic'}">${played ? (s1 > s2 ? g.t1 + ' Win' : g.t2 + ' Win') : 'Not yet played'}</div>${boxScoreBtn}</div>`;
-  }).join('');
+  if (homeMatchups) homeMatchups.innerHTML = games.map((g, i) => buildMatchupCard({ ...g, game: g.game || i + 1 }, g.gameId || '')).join('');
   if (homeAwards) homeAwards.innerHTML = `
     <div class="award-card akhlaq-card"><div class="akhlaq-inner"><div class="akhlaq-medal">☽</div><div><div class="award-label">${akhlaqLabel(displayWeek)}</div><div class="award-winner">${wa.akhlaq || pending()}</div><div class="award-winner-sub">Exemplary character & brotherhood</div></div></div></div>
     ${games.map((g, i) => `<div class="award-card"><div class="award-label">${motmLabel(g.game || i + 1)}</div><div class="award-game">${g.t1} vs ${g.t2}</div><div class="award-winner">${wa['motm' + (g.game || i + 1)] || pending()}</div></div>`).join('')}`;
@@ -247,6 +246,73 @@ function formatGameDate(scheduledAt) {
   const d = new Date(scheduledAt);
   if (isNaN(d.getTime())) return '';
   return d.toLocaleString('en-US', { month: 'short', day: 'numeric' });
+}
+
+const TEAM_LOGOS = {
+  ansar: 'ansar.png',
+  dukhaan: 'dukhaan.jpg',
+  jaysh: 'jaysh.png',
+  mujahideen: 'mujahideen.png',
+  noor: 'noor.png',
+  raad: 'raad.jpg',
+};
+
+function teamLogoUrl(name) {
+  const slug = (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const key = Object.keys(TEAM_LOGOS).find(k => slug.includes(k) || k.includes(slug));
+  return key ? `${getBasePath()}/images/teams/${TEAM_LOGOS[key]}` : null;
+}
+
+function teamLogoHtml(name, side) {
+  const url = teamLogoUrl(name);
+  const cls = `mc-logo mc-logo-${side}`;
+  if (url) return `<img src="${url}" class="${cls} mc-logo-img" alt="${escapeHtmlAttr(name)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="${cls}" style="display:none">${initials(name || '?')}</div>`;
+  return `<div class="${cls}">${initials(name || '?')}</div>`;
+}
+
+/**
+ * Builds the HTML for a single matchup card.
+ * t1 = home (right, teal), t2 = away (left, white).
+ * Layout: [away logo | away name] [VS/score + box btn] [home name | home logo]
+ */
+function buildMatchupCard(g, gameId) {
+  const played = g.s1 !== '' && g.s2 !== '';
+  const s1 = parseInt(g.s1 || 0), s2 = parseInt(g.s2 || 0);
+  const w1 = played && s1 > s2, w2 = played && s2 > s1;
+
+  // Header band: Game N (left) | time (center) | date (right)
+  const dateStr = formatGameDate(g.scheduled_at);
+  const timeStr = played ? '' : formatGameTime(g.scheduled_at, g.game || 1);
+  const header = `<div class="mc-header">
+    <span class="mc-meta-game">Game ${g.game || 1}</span>
+    <span class="mc-meta-time">${timeStr}</span>
+    <span class="mc-meta-date">${dateStr}</span>
+  </div>`;
+
+  // Center column: VS decoration or scores, then box score button below
+  const boxBtn = gameId
+    ? `<button type="button" class="schedule-expand-btn" data-game-id="${gameId}" style="background:transparent;border:none;color:#c8a84b;font-size:0.76rem;cursor:pointer;padding:0.25rem 0 0;letter-spacing:0.05em;">View box score</button>`
+    : '';
+
+  const mid = played
+    ? `<div class="mc-mid"><div class="mc-score-row"><span class="mc-score${w2 ? ' winner' : ''}">${g.s2}</span><span class="mc-dash">—</span><span class="mc-score${w1 ? ' winner' : ''}">${g.s1}</span></div>${boxBtn}</div>`
+    : `<div class="mc-mid"><div class="mc-vs-wrap"><span class="mc-vs-deco">VS</span><span class="mc-vs">VS</span></div>${boxBtn}</div>`;
+
+  const winnerTag = played
+    ? `<div class="mc-winner-tag">${s1 > s2 ? escapeHtmlAttr(g.t1) : escapeHtmlAttr(g.t2)} Win</div>`
+    : '';
+
+  // Away (t2): logo outer-left, name right of logo toward center
+  // Home (t1): name toward center, logo outer-right (DOM order: name then logo)
+  return `<div class="matchup-card">
+    ${header}
+    <div class="mc-body">
+      <div class="mc-away">${teamLogoHtml(g.t2, 'away')}<span class="mc-team-name mc-away-name">${escapeHtmlAttr(g.t2)}</span></div>
+      ${mid}
+      <div class="mc-home"><span class="mc-team-name mc-home-name">${escapeHtmlAttr(g.t1)}</span>${teamLogoHtml(g.t1, 'home')}</div>
+    </div>
+    ${winnerTag}
+  </div>`;
 }
 
 function renderBoxScore(game, teams, gameStatValues, statDefinitions) {
@@ -346,34 +412,11 @@ function scheduleWeekTitle(w) {
 }
 
 export function renderSchedule(focusWeek, teamFilter) {
+  const allEl = document.getElementById('schedule-all-content');
   const prevEl = document.getElementById('schedule-prev');
   const focusEl = document.getElementById('schedule-focus');
   const nextEl = document.getElementById('schedule-next');
-  if (!prevEl || !focusEl || !nextEl) return;
-
-  prevEl.style.display = focusWeek === 1 ? 'none' : '';
-  nextEl.style.display = focusWeek === config.TOTAL_WEEKS ? 'none' : '';
-
-  const renderWeek = (w, label) => {
-    let games = (config.DB.scores || []).filter(g => g.week === w);
-    if (teamFilter) games = games.filter(g => g.t1 === teamFilter || g.t2 === teamFilter);
-    if (!games.length) return `<div class="card" style="text-align:center;padding:1.4rem;margin-bottom:0.9rem;"><div style="font-size:0.9rem;color:#c8c0b0;font-style:italic;">${scheduleWeekTitle(w)} — No games${teamFilter ? ' for this team' : ''}.</div></div>`;
-    const cards = games.map(g => {
-      const played = g.s1 !== '' && g.s2 !== '';
-      const s1 = parseInt(g.s1 || 0), s2 = parseInt(g.s2 || 0), w1 = played && s1 > s2, w2 = played && s2 > s1;
-      const gameId = g.gameId || '';
-      let cardInner = '';
-      if (played) {
-        cardInner = `<div class="matchup-game-label">Game ${g.game || 1}</div><div class="matchup-row"><span class="matchup-team ${w1 ? 'winner' : ''}">${g.t1}</span><span class="matchup-score ${w1 ? 'winner' : ''}">${g.s1}</span></div><div class="matchup-mid"></div><div class="matchup-row"><span class="matchup-team ${w2 ? 'winner' : ''}">${g.t2}</span><span class="matchup-score ${w2 ? 'winner' : ''}">${g.s2}</span></div><div class="winner-tag">${s1 > s2 ? g.t1 + ' Win' : g.t2 + ' Win'}</div>`;
-      } else {
-        const timeStr = formatGameTime(g.scheduled_at, g.game || 1);
-        const dateStr = formatGameDate(g.scheduled_at);
-        cardInner = `<div class="matchup-game-label" style="display:flex;justify-content:space-between;align-items:center;"><span>Game ${g.game || 1}</span><span style="font-weight:normal;letter-spacing:0;">${timeStr}</span><span style="font-weight:normal;letter-spacing:0;">${dateStr}</span></div><div class="matchup-row"><span class="matchup-team">${g.t1}</span></div><div class="matchup-mid"></div><div class="matchup-row"><span class="matchup-team">${g.t2}</span></div>`;
-      }
-      return `<div class="matchup-card"><div class="matchup-card-main">${cardInner}</div><button type="button" class="schedule-expand-btn" data-game-id="${gameId}" style="margin-top:0.5rem;background:transparent;border:none;color:#c8a84b;font-size:0.8rem;cursor:pointer;padding:0;">View box score</button></div>`;
-    });
-    return `<div style="margin-bottom:1.1rem;"><div style="font-family:'Cinzel',serif;font-size:0.84rem;letter-spacing:0.18em;text-transform:uppercase;color:#c8a84b;margin-bottom:0.7rem;">${label}</div><div class="matchups-grid">${cards.join('')}</div></div>`;
-  };
+  if (!focusEl && !allEl) return;
 
   if (!window.scheduleBoxScoreHandlersAttached) {
     window.scheduleBoxScoreHandlersAttached = true;
@@ -386,9 +429,63 @@ export function renderSchedule(focusWeek, teamFilter) {
     });
   }
 
-  if (focusWeek > 1) prevEl.innerHTML = renderWeek(focusWeek - 1, `${scheduleWeekTitle(focusWeek - 1)} — Previous`);
-  focusEl.innerHTML = renderWeek(focusWeek, `${scheduleWeekTitle(focusWeek)}${focusWeek === config.CURRENT_WEEK ? ' — Current' : ''}`);
-  if (focusWeek < config.TOTAL_WEEKS) nextEl.innerHTML = renderWeek(focusWeek + 1, `${scheduleWeekTitle(focusWeek + 1)} — Next`);
+  const renderWeekBlock = (w, label) => {
+    let games = (config.DB.scores || []).filter(g => g.week === w);
+    if (teamFilter) games = games.filter(g => g.t1 === teamFilter || g.t2 === teamFilter);
+    if (!games.length) return `<div class="card" style="text-align:center;padding:1.4rem;margin-bottom:0.9rem;"><div style="font-size:0.9rem;color:#c8c0b0;font-style:italic;">${scheduleWeekTitle(w)} — No games${teamFilter ? ' for this team' : ''}.</div></div>`;
+    const cards = games.map(g => buildMatchupCard(g, g.gameId || ''));
+    return `<div style="margin-bottom:1.1rem;"><div style="font-family:'Cinzel',serif;font-size:0.84rem;letter-spacing:0.18em;text-transform:uppercase;color:#c8a84b;margin-bottom:0.7rem;">${label}</div><div class="matchups-grid">${cards.join('')}</div></div>`;
+  };
+
+  const sectionHeader = (label, isCurrent) =>
+    `<div class="schedule-section-header${isCurrent ? ' schedule-section-header-current' : ''}"><span>${label}</span></div>`;
+
+  if (focusWeek === 'all') {
+    // All-weeks view: Past / Current / Upcoming sections
+    if (prevEl) prevEl.style.display = 'none';
+    if (focusEl) focusEl.style.display = 'none';
+    if (nextEl) nextEl.style.display = 'none';
+    if (!allEl) return;
+    allEl.style.display = '';
+    const cur = config.CURRENT_WEEK;
+    const total = config.TOTAL_WEEKS;
+    let html = '';
+    // Past — collapsible, collapsed by default
+    if (cur > 1) {
+      html += `<div class="schedule-section-header schedule-section-header-toggle" id="schedule-past-toggle"><span class="schedule-past-arrow">▸</span><span>Past</span></div>`;
+      html += `<div id="schedule-past-body" style="display:none;">`;
+      for (let w = 1; w < cur; w++) html += renderWeekBlock(w, scheduleWeekTitle(w));
+      html += `</div>`;
+    }
+    // Current
+    html += sectionHeader('Current Week', true);
+    html += renderWeekBlock(cur, scheduleWeekTitle(cur));
+    // Upcoming
+    if (cur < total) {
+      html += sectionHeader('Upcoming', false);
+      for (let w = cur + 1; w <= total; w++) html += renderWeekBlock(w, scheduleWeekTitle(w));
+    }
+    allEl.innerHTML = html;
+    // Wire Past toggle
+    const pastToggle = allEl.querySelector('#schedule-past-toggle');
+    const pastBody = allEl.querySelector('#schedule-past-body');
+    if (pastToggle && pastBody) {
+      pastToggle.addEventListener('click', () => {
+        const open = pastBody.style.display !== 'none';
+        pastBody.style.display = open ? 'none' : '';
+        const arrow = pastToggle.querySelector('.schedule-past-arrow');
+        if (arrow) arrow.textContent = open ? '▸' : '▾';
+      });
+    }
+  } else {
+    // Single-week view
+    if (allEl) allEl.style.display = 'none';
+    if (prevEl) prevEl.style.display = 'none';
+    if (nextEl) nextEl.style.display = 'none';
+    if (!focusEl) return;
+    focusEl.style.display = '';
+    focusEl.innerHTML = renderWeekBlock(focusWeek, `${scheduleWeekTitle(focusWeek)}${focusWeek === config.CURRENT_WEEK ? ' — Current' : ''}`);
+  }
 }
 
 export function renderScores(week) {
@@ -397,13 +494,7 @@ export function renderScores(week) {
   const rw = w => {
     const games = config.DB.scores.filter(g => g.week === w);
     if (!games.length || games.every(g => !g.s1 && !g.s2)) return `<div class="card" style="text-align:center;padding:1.4rem;margin-bottom:0.9rem;"><div style="font-size:0.9rem;color:#c8c0b0;font-style:italic;">Week ${w} — No results yet.</div></div>`;
-    const cards = games.map(g => {
-      const played = g.s1 !== '' && g.s2 !== '';
-      const s1 = parseInt(g.s1 || 0), s2 = parseInt(g.s2 || 0), w1 = played && s1 > s2, w2 = played && s2 > s1;
-      const gameId = g.gameId || '';
-      const cardInner = `<div class="matchup-game-label">Game ${g.game}</div><div class="matchup-row"><span class="matchup-team ${w1 ? 'winner' : ''}">${g.t1}</span><span class="matchup-score ${w1 ? 'winner' : ''}">${played ? g.s1 : '—'}</span></div><div class="matchup-mid"></div><div class="matchup-row"><span class="matchup-team ${w2 ? 'winner' : ''}">${g.t2}</span><span class="matchup-score ${w2 ? 'winner' : ''}">${played ? g.s2 : '—'}</span></div><div class="winner-tag" style="${played ? '' : 'color:#c8c0b0'}">${played ? (s1 > s2 ? g.t1 + ' Win' : g.t2 + ' Win') : 'Not played'}</div>`;
-      return `<div class="matchup-card"><div class="matchup-card-main">${cardInner}</div><button type="button" class="schedule-expand-btn" data-game-id="${gameId}" style="margin-top:0.5rem;background:transparent;border:none;color:#c8a84b;font-size:0.8rem;cursor:pointer;padding:0;">View box score</button></div>`;
-    });
+    const cards = games.map(g => buildMatchupCard(g, g.gameId || ''));
     return `<div style="margin-bottom:1.1rem;"><div style="font-family:'Cinzel',serif;font-size:0.84rem;letter-spacing:0.18em;text-transform:uppercase;color:#c8a84b;margin-bottom:0.7rem;">Week ${w}${w == config.CURRENT_WEEK ? ' — Current' : ''}</div><div class="matchups-grid">${cards.join('')}</div></div>`;
   };
   el.innerHTML = week === 'all' ? Array.from({ length: config.TOTAL_WEEKS }, (_, i) => rw(i + 1)).join('') : rw(parseInt(week));
