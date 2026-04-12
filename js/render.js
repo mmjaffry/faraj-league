@@ -20,10 +20,11 @@ function getWeeksPlayed() { return new Set(config.DB.scores.filter(g => g.s1 !==
 export function calcStandings() {
   return calcStandingsPure(config.DB.teams, config.DB.scores);
 }
-function buildWeekDropdown(elId, includeAll) {
+function buildWeekDropdown(elId, includeAll, maxWeek) {
+  const max = maxWeek != null ? maxWeek : config.TOTAL_WEEKS;
   const el = document.getElementById(elId); if (!el) return; el.innerHTML = '';
   if (includeAll) el.innerHTML += `<option value="all">All Weeks</option>`;
-  for (let w = 1; w <= config.TOTAL_WEEKS; w++) el.innerHTML += `<option value="${w}">Week ${w}${w === config.CURRENT_WEEK ? ' (Current)' : ''}</option>`;
+  for (let w = 1; w <= max; w++) el.innerHTML += `<option value="${w}">Week ${w}${w === config.CURRENT_WEEK ? ' (Current)' : ''}</option>`;
 }
 
 function buildScheduleTeamFilter() {
@@ -159,6 +160,18 @@ export function renderAll(adminMode = false) {
   const schedFocusWeek = (!schedWeekVal || schedWeekVal === 'all') ? 'all' : parseInt(schedWeekVal, 10);
   renderSchedule(schedFocusWeek, teamFilterVal || null);
   renderMedia(config.CURRENT_WEEK);
+  // Power rankings: only current + past weeks in dropdown
+  const prevPrWeekVal = document.getElementById('pr-week-select')?.value;
+  buildWeekDropdown('pr-week-select', false, config.CURRENT_WEEK);
+  const prSel = document.getElementById('pr-week-select');
+  if (prSel) {
+    const defaultPrWeek = Math.max(1, config.CURRENT_WEEK - 1);
+    const restoredPr = prevPrWeekVal && parseInt(prevPrWeekVal) >= 1 && parseInt(prevPrWeekVal) <= config.CURRENT_WEEK
+      ? prevPrWeekVal : String(defaultPrWeek);
+    prSel.value = restoredPr;
+  }
+  renderPowerRankings(parseInt(prSel?.value || Math.max(1, config.CURRENT_WEEK - 1)));
+  set('pr-section-sub', config.currentSeasonLabel);
   renderAbout();
   renderDraft(adminMode);
 }
@@ -662,6 +675,46 @@ export function renderAwards(week) {
   if (saChamp) saChamp.textContent = sa.champ || `${config.currentSeasonLabel} — In Progress`;
   if (saMvp) saMvp.textContent = sa.mvp || 'Season in progress';
   if (saScoring) saScoring.textContent = sa.scoring || 'Season in progress';
+}
+
+export function renderPowerRankings(week) {
+  const el = document.getElementById('pr-content');
+  if (!el) return;
+  const w = parseInt(week, 10);
+  let weekData = [];
+  try {
+    const raw = config.DB.contentBlocks?.power_rankings_data;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      weekData = parsed[String(w)] || parsed[w] || [];
+    }
+  } catch (_) {}
+  const teamMap = {};
+  (config.DB.teams || []).forEach(t => { teamMap[t.id] = t; });
+  const isLatest = w === Math.max(1, config.CURRENT_WEEK - 1);
+  const weekLabel = `Week ${w}${isLatest ? ' · Latest' : ''}`;
+  if (!weekData.length) {
+    el.innerHTML = `<div class="pr-week-label">${weekLabel}</div><div style="color:#8a8580;font-style:italic;padding:1rem 0;">No rankings for this week yet.</div>`;
+    return;
+  }
+  const rows = weekData.map((entry, i) => {
+    const team = teamMap[entry.teamId];
+    const name = team?.name || '—';
+    const teamKey = teamLogoKey(name);
+    const logoUrl = teamKey ? `${getBasePath()}/images/teams/${TEAM_LOGOS[teamKey]}` : null;
+    const s = logoUrl ? (LOGO_SCALE[teamKey] ?? DEFAULT_LOGO_SCALE) : null;
+    const scaleVal = s != null ? (Array.isArray(s) ? `${s[0]}, ${s[1]}` : s) : null;
+    const logoInner = logoUrl
+      ? `<img src="${logoUrl}" class="mc-logo-img" alt="${escapeHtmlAttr(name)}" style="transform:scale(${scaleVal})" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><span style="display:none;width:100%;height:100%;align-items:center;justify-content:center;">${initials(name)}</span>`
+      : initials(name);
+    const noteHtml = entry.note ? `<div class="pr-note">${entry.note}</div>` : '';
+    return `<div class="pr-row">
+      <div class="pr-rank">#${i + 1}</div>
+      <div class="pr-logo">${logoInner}</div>
+      <div class="pr-info"><div class="pr-team-name">${escapeHtmlAttr(name)}</div>${noteHtml}</div>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div class="pr-week-label">${weekLabel}</div><div class="pr-list">${rows}</div>`;
 }
 
 const BASELINE_SLOTS = [

@@ -2956,3 +2956,181 @@ export async function renderAbout(content, ctx) {
 
 /** No-op. Draft is rendered by js/render.js renderDraft(adminMode) via renderAll(true). */
 export async function renderDraft() {}
+
+export async function renderAdminPowerRankings(content, ctx) {
+  const { adminFetch } = ctx;
+  const seasonId = window.adminSeasonId;
+  if (!seasonId || !content) return;
+
+  const { config } = await importRootJs('config.js');
+  const teams = config.DB.teams || [];
+
+  let allData = {};
+  try {
+    const raw = config.DB.contentBlocks?.power_rankings_data;
+    if (raw) allData = JSON.parse(raw);
+  } catch (_) {}
+
+  const currentWeek = config.CURRENT_WEEK || 1;
+
+  const weekOpts = Array.from({ length: currentWeek }, (_, i) => i + 1)
+    .map(w => `<option value="${w}"${w === currentWeek ? ' selected' : ''}>Week ${w}${w === currentWeek ? ' (Current)' : ''}</option>`)
+    .join('');
+
+  content.innerHTML = `
+    <div id="pr-admin-msg"></div>
+    <div style="margin-bottom:1.2rem;">
+      <label style="color:#c8c0b0;font-size:0.85rem;margin-right:0.5rem;">Editing Week</label>
+      <select id="pr-admin-week-select" style="background:#0a1f2e;border:1px solid rgba(200,168,75,0.3);color:#f5f0e8;padding:0.4rem 0.6rem;border-radius:4px;">${weekOpts}</select>
+    </div>
+    <p style="font-size:0.78rem;color:#8a8580;margin-bottom:0.9rem;">Drag rows to reorder. Note boxes are optional.</p>
+    <ul id="pr-drag-list" style="list-style:none;padding:0;margin:0 0 1rem;"></ul>
+    <button id="pr-admin-save" style="padding:0.5rem 1.4rem;background:#c8a84b;color:#060f1a;border:none;border-radius:4px;font-weight:700;cursor:pointer;font-size:0.9rem;">Save Rankings</button>`;
+
+  const inits = (name) => (name || '').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+
+  const fmtBtnStyle = 'padding:0.1rem 0.38rem;background:#0a1f2e;border:1px solid rgba(200,168,75,0.25);color:#c8c0b0;border-radius:3px;cursor:pointer;font-size:0.78rem;line-height:1.5;';
+
+  function buildRow(teamId, note, rank) {
+    const team = teams.find(t => t.id === teamId);
+    if (!team) return null;
+    const li = document.createElement('li');
+    li.dataset.teamId = teamId;
+    li.draggable = true;
+    li.style.cssText = 'display:flex;align-items:flex-start;gap:0.7rem;padding:0.55rem 0.6rem;margin-bottom:0.45rem;background:rgba(255,255,255,0.03);border:1px solid rgba(200,168,75,0.12);border-radius:6px;user-select:none;';
+
+    const staticHtml = `
+      <span class="pr-drag-handle" style="color:#4a5a6a;font-size:1.15rem;cursor:grab;padding:0 0.15rem;flex-shrink:0;margin-top:0.3rem;" title="Drag to reorder">⠿</span>
+      <div style="color:#c8a84b;font-family:'Cinzel',serif;font-size:0.82rem;font-weight:700;min-width:1.6rem;text-align:right;flex-shrink:0;margin-top:0.3rem;">#${rank}</div>
+      <div style="width:34px;height:34px;border-radius:50%;background:#1a2535;border:2px solid rgba(200,168,75,0.28);display:flex;align-items:center;justify-content:center;font-family:'Cinzel',serif;font-size:0.72rem;font-weight:700;color:#c8a84b;flex-shrink:0;">${inits(team.name)}</div>
+      <span style="min-width:7rem;color:#f5f0e8;font-size:0.88rem;font-weight:600;flex-shrink:0;margin-top:0.3rem;">${team.name}</span>`;
+    li.innerHTML = staticHtml;
+
+    // Note editor: toolbar + contenteditable
+    const noteWrap = document.createElement('div');
+    noteWrap.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:0.25rem;';
+
+    const toolbar = document.createElement('div');
+    toolbar.style.cssText = 'display:flex;gap:0.25rem;';
+    [['<b>B</b>', 'bold', 'font-weight:700;font-family:serif;'],
+     ['<i>I</i>', 'italic', 'font-style:italic;font-family:serif;'],
+     ['<u>U</u>', 'underline', 'text-decoration:underline;']].forEach(([label, cmd, extra]) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.innerHTML = label;
+      b.title = cmd.charAt(0).toUpperCase() + cmd.slice(1);
+      b.style.cssText = fmtBtnStyle + extra;
+      b.addEventListener('mousedown', e => {
+        e.preventDefault();
+        editor.focus();
+        document.execCommand(cmd, false, null);
+      });
+      toolbar.appendChild(b);
+    });
+
+    const editor = document.createElement('div');
+    editor.className = 'pr-note-input';
+    editor.contentEditable = 'true';
+    editor.innerHTML = note;
+    editor.style.cssText = 'padding:0.32rem 0.5rem;background:#0a1f2e;border:1px solid rgba(200,168,75,0.2);color:#f5f0e8;border-radius:4px;font-size:0.83rem;min-height:2rem;outline:none;white-space:pre-wrap;';
+    editor.dataset.placeholder = 'Note...';
+
+    // Stop drag when user interacts with the editor area
+    [editor, toolbar].forEach(el => {
+      el.addEventListener('mousedown', e => e.stopPropagation());
+    });
+    editor.addEventListener('dragstart', e => e.stopPropagation());
+
+    noteWrap.appendChild(toolbar);
+    noteWrap.appendChild(editor);
+    li.appendChild(noteWrap);
+    return li;
+  }
+
+  function refreshRankNumbers() {
+    const list = document.getElementById('pr-drag-list');
+    if (!list) return;
+    [...list.children].forEach((li, i) => {
+      const rankEl = li.querySelector('div[style*="Cinzel"]');
+      if (rankEl) rankEl.textContent = '#' + (i + 1);
+    });
+  }
+
+  function loadWeek(w) {
+    const list = document.getElementById('pr-drag-list');
+    list.innerHTML = '';
+    const weekData = allData[String(w)] || [];
+    const noteMap = {};
+    const orderedIds = weekData.map(e => { noteMap[e.teamId] = e.note || ''; return e.teamId; });
+    // Append any teams not yet ranked to the bottom
+    const unranked = teams.map(t => t.id).filter(id => !orderedIds.includes(id));
+    [...orderedIds, ...unranked].forEach((teamId, i) => {
+      const li = buildRow(teamId, noteMap[teamId] || '', i + 1);
+      if (li) list.appendChild(li);
+    });
+  }
+
+  loadWeek(currentWeek);
+
+  // Drag-and-drop — attach once to the container
+  const list = document.getElementById('pr-drag-list');
+  let dragging = null;
+
+  list.addEventListener('dragstart', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON' || e.target.closest('[contenteditable]')) { e.preventDefault(); return; }
+    dragging = e.target.closest('li');
+    if (!dragging) return;
+    setTimeout(() => { if (dragging) dragging.style.opacity = '0.35'; }, 0);
+    e.dataTransfer.effectAllowed = 'move';
+  });
+
+  list.addEventListener('dragend', () => {
+    if (dragging) dragging.style.opacity = '';
+    dragging = null;
+    refreshRankNumbers();
+  });
+
+  list.addEventListener('dragover', e => {
+    e.preventDefault();
+    if (!dragging) return;
+    const over = e.target.closest('li');
+    if (!over || over === dragging) return;
+    const rect = over.getBoundingClientRect();
+    if (e.clientY < rect.top + rect.height / 2) {
+      list.insertBefore(dragging, over);
+    } else {
+      list.insertBefore(dragging, over.nextSibling);
+    }
+  });
+
+  document.getElementById('pr-admin-week-select').onchange = function () {
+    loadWeek(parseInt(this.value));
+  };
+
+  document.getElementById('pr-admin-save').onclick = async () => {
+    const week = parseInt(document.getElementById('pr-admin-week-select').value);
+    const weekArr = [...list.querySelectorAll('li')].map(li => ({
+      teamId: li.dataset.teamId,
+      note: (li.querySelector('.pr-note-input')?.innerHTML || '').trim(),
+    }));
+    allData[String(week)] = weekArr;
+
+    const msg = document.getElementById('pr-admin-msg');
+    try {
+      await adminFetch('admin-content', {
+        method: 'POST',
+        body: JSON.stringify([{ key: 'power_rankings_data', value: JSON.stringify(allData), season_id: seasonId }]),
+      });
+      if (!config.DB.contentBlocks) config.DB.contentBlocks = {};
+      config.DB.contentBlocks.power_rankings_data = JSON.stringify(allData);
+      const prSel = document.getElementById('pr-week-select');
+      if (typeof window.renderPowerRankings === 'function') {
+        window.renderPowerRankings(prSel ? parseInt(prSel.value) || week : week);
+      }
+      msg.innerHTML = '<p class="msg success">Saved.</p>';
+      setTimeout(() => { msg.innerHTML = ''; }, 3000);
+    } catch (err) {
+      msg.innerHTML = `<p class="msg error">${err.message || 'Save failed.'}</p>`;
+    }
+  };
+}
