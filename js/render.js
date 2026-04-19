@@ -234,8 +234,10 @@ export function renderHome() {
   const homeMatchups = document.getElementById('home-matchups');
   const homeAwards = document.getElementById('home-awards');
   if (homeMatchups) homeMatchups.innerHTML = games.map((g, i) => buildMatchupCard({ ...g, game: g.game || i + 1 }, g.gameId || '')).join('');
-  if (homeAwards) homeAwards.innerHTML = `
-    <div class="award-card akhlaq-card home-award-link"><div class="akhlaq-inner"><div class="akhlaq-medal">☽</div><div><div class="award-label">${akhlaqLabel(displayWeek)}</div><div class="award-winner">${wa.akhlaq || pending()}</div><div class="award-winner-sub">Exemplary character & brotherhood</div></div></div></div>`;
+  if (homeAwards) {
+    const akhlaqPost = wa.akhlaq_post_url ? `<div class="akhlaq-post-wrap" style="margin-top:0.75rem;text-align:center;"><a href="${wa.akhlaq_post_url.replace(/"/g, '&quot;')}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1.1rem;background:rgba(200,168,75,0.1);border:1px solid rgba(200,168,75,0.3);border-radius:4px;color:#c8a84b;font-size:0.8rem;letter-spacing:0.12em;text-transform:uppercase;text-decoration:none;">▶ Watch on Instagram</a></div>` : '';
+    homeAwards.innerHTML = `<div class="award-card akhlaq-card home-award-link"><div class="akhlaq-inner"><div class="akhlaq-medal">☽</div><div><div class="award-label">${akhlaqLabel(displayWeek)}</div><div class="award-winner">${wa.akhlaq || pending()}</div><div class="award-winner-sub">Exemplary character & brotherhood</div></div></div>${akhlaqPost}</div>`;
+  }
 }
 
 export function renderStandings() {
@@ -381,9 +383,9 @@ function buildMatchupCard(g, gameId) {
   return `<div class="matchup-card"${g.week != null ? ` data-week="${g.week}"` : ''}>
     ${header}
     <div class="mc-body">
-      <div class="mc-away">${teamLogoHtml(g.t2, 'away')}<span class="mc-team-name mc-away-name">${escapeHtmlAttr(g.t2)}</span></div>
+      <div class="mc-away">${teamLogoHtml(g.t2, 'away')}<span class="mc-team-name mc-away-name"${g.t2Id ? ` data-team-id="${escapeHtmlAttr(g.t2Id)}"` : ''}>${escapeHtmlAttr(g.t2)}</span></div>
       ${mid}
-      <div class="mc-home"><span class="mc-team-name mc-home-name">${escapeHtmlAttr(g.t1)}</span>${teamLogoHtml(g.t1, 'home')}</div>
+      <div class="mc-home"><span class="mc-team-name mc-home-name"${g.t1Id ? ` data-team-id="${escapeHtmlAttr(g.t1Id)}"` : ''}>${escapeHtmlAttr(g.t1)}</span>${teamLogoHtml(g.t1, 'home')}</div>
     </div>
     ${winnerLine}
     ${boxRow}
@@ -722,8 +724,9 @@ export function renderAwards(week) {
   const w = parseInt(week, 10), wa = config.DB.awards.find(a => Number(a.week) === w) || {};
   const games = config.DB.scores.filter(g => Number(g.week) === w);
   const g1 = games[0] || { t1: 'TBD', t2: 'TBD' }, g2 = games[1] || { t1: 'TBD', t2: 'TBD' }, g3 = games[2] || { t1: 'TBD', t2: 'TBD' };
+  const akhlaqPost = wa.akhlaq_post_url ? `<div class="akhlaq-post-wrap" style="margin-top:0.75rem;text-align:center;"><a href="${wa.akhlaq_post_url.replace(/"/g, '&quot;')}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1.1rem;background:rgba(200,168,75,0.1);border:1px solid rgba(200,168,75,0.3);border-radius:4px;color:#c8a84b;font-size:0.8rem;letter-spacing:0.12em;text-transform:uppercase;text-decoration:none;">▶ Watch on Instagram</a></div>` : '';
   awardsGrid.innerHTML = `
-    <div class="award-card akhlaq-card"><div class="akhlaq-inner"><div class="akhlaq-medal">☽</div><div><div class="award-label">${akhlaqLabel(w)}</div><div class="award-winner" id="award-winner-akhlaq" data-field="akhlaq">${wa.akhlaq || pending()}</div><div class="award-winner-sub">Exemplary character & brotherhood on and off the court</div></div></div></div>`;
+    <div class="award-card akhlaq-card"><div class="akhlaq-inner"><div class="akhlaq-medal">☽</div><div><div class="award-label">${akhlaqLabel(w)}</div><div class="award-winner" id="award-winner-akhlaq" data-field="akhlaq">${wa.akhlaq || pending()}</div><div class="award-winner-sub">Exemplary character & brotherhood on and off the court</div></div></div>${akhlaqPost}</div>`;
   const sa = config.DB.awards.find(a => a.champ) || {};
   const saChamp = document.getElementById('sa-champ');
   const saMvp = document.getElementById('sa-mvp');
@@ -802,35 +805,41 @@ function getMediaLayout(blocks) {
   return layout;
 }
 
+export function activateInstagramEmbeds() {}
+
 export function renderMedia(week) {
-  const ws = week === 'all' ? Array.from({ length: config.TOTAL_WEEKS }, (_, i) => i + 1) : [parseInt(week)];
+  const displayWeek = (week && week !== 'all') ? parseInt(week, 10) : config.CURRENT_WEEK;
   const soon = `<div class="video-title" style="font-style:italic;">Coming soon</div>`;
-  const mediaItems = config.DB.mediaItems || [];
-  const mediaSlots = config.DB.mediaSlots || {};
   const blocks = config.DB.contentBlocks || {};
   const el = document.getElementById('media-content');
   if (!el) return;
   const layout = getMediaLayout(blocks);
-  const hasSections = layout.sections?.length > 0;
 
-  if (!hasSections) {
+  const visibleSections = (layout.sections || [])
+    .map(sec => ({
+      ...sec,
+      blocks: (sec.blocks || []).filter(b => b.week == null || b.week === displayWeek),
+    }))
+    .filter(sec => (sec.week == null || sec.week === displayWeek) && sec.blocks.length > 0);
+
+  if (!visibleSections.length) {
     el.innerHTML = `<div class="media-empty-state" style="text-align:center;padding:3rem 1.5rem;color:#8a8580;font-size:0.95rem;">Add a section to get started.</div>`;
     renderMediaLinks();
     return;
   }
 
-  const sectionHtml = layout.sections.map((sec, si) => {
+  const sectionHtml = visibleSections.map((sec, si) => {
     const secId = (sec.id || 'sec_' + si).replace(/"/g, '&quot;');
     const secTitle = (sec.title || 'Section').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-    const blockCards = (sec.blocks || []).map((b, bi) => {
+    const blockCards = sec.blocks.map((b, bi) => {
       const bid = (b.id || 'blk_' + bi).replace(/"/g, '&quot;');
       const btitle = (b.title || 'Media').replace(/</g, '&lt;').replace(/"/g, '&quot;');
       const url = b.url || '';
       const spanStyle = b.width === 'full' ? ' style="grid-column:1/-1;"' : '';
       const dataAttrs = ` data-section-id="${secId}" data-block-id="${bid}"`;
       const cardInner = url
-        ? `<div class="video-icon">▶</div><div class="video-label">${btitle}</div><a href="${url.replace(/"/g, '&quot;')}" target="_blank" rel="noopener" class="insta-btn">Watch</a>`
-        : `<div class="video-icon">▶</div><div class="video-label">${btitle}</div>${soon}<button class="insta-btn">View on Instagram</button>`;
+        ? `<a href="${url.replace(/"/g, '&quot;')}" target="_blank" rel="noopener" class="video-card-link" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.75rem;text-decoration:none;width:100%;height:100%;padding:1.5rem 1rem;box-sizing:border-box;"><div class="video-play-icon" style="width:56px;height:56px;border-radius:50%;background:rgba(200,168,75,0.15);border:2px solid rgba(200,168,75,0.4);display:flex;align-items:center;justify-content:center;font-size:1.4rem;color:#c8a84b;">▶</div><div class="video-label" style="text-align:center;">${btitle}</div><span style="font-size:0.75rem;color:#8a8580;letter-spacing:0.1em;text-transform:uppercase;">Watch on Instagram</span></a>`
+        : `<div class="video-icon">▶</div><div class="video-label">${btitle}</div>${soon}`;
       return `<div class="video-card"${dataAttrs}${spanStyle}>${cardInner}</div>`;
     }).join('');
     return `<div class="media-layout-section" data-section-id="${secId}"><div class="media-section-header" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;"><div class="media-section-title" data-section-id="${secId}" data-editable-title>${secTitle}</div></div><div class="media-grid">${blockCards}</div></div>`;
