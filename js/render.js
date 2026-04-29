@@ -748,40 +748,47 @@ export function renderMvpLadder(week) {
   const wrap = document.getElementById('awards-mvp-ladder-wrap');
   if (!wrap) return;
 
-  let ladderPlayerIds = null;
+  let ladderEntries = null;
   try {
     const raw = config.DB.contentBlocks?.mvp_ladder_data;
     if (raw) {
       const allData = JSON.parse(raw);
       const keys = Object.keys(allData).map(Number).filter(k => k <= week).sort((a, b) => b - a);
-      if (keys.length > 0) ladderPlayerIds = allData[String(keys[0])];
+      if (keys.length > 0) ladderEntries = allData[String(keys[0])];
     }
   } catch (_) {}
 
-  if (!ladderPlayerIds?.length) { wrap.innerHTML = ''; return; }
+  if (!ladderEntries?.length) { wrap.innerHTML = ''; return; }
 
   const playerMap = {};
   (config.DB.teams || []).forEach(t => {
     (t.roster || []).forEach(p => { playerMap[p.id] = { name: p.name, team: t.name }; });
   });
 
-  const defs = config.DB.statDefinitions || [];
-  const pointsDef = defs.find(d => d.slug === 'points');
-  const statsMap = {};
-  (config.DB.stats || []).forEach(s => {
-    const pts = pointsDef ? (s.statValues?.[pointsDef.id] || 0) : s.total;
-    statsMap[s.name] = s.gp > 0 ? pts / s.gp : null;
-  });
+  // Normalize: old format = array of id strings, new format = array of {id, pts}
+  const normalize = (e) => typeof e === 'string' ? { id: e, pts: null } : { id: e?.id || '', pts: e?.pts ?? null };
 
-  const entries = ladderPlayerIds.map((id, i) => {
+  const entries = ladderEntries.map((raw, i) => {
+    const { id, pts } = normalize(raw);
     const p = playerMap[id];
     if (!p) return null;
-    return { rank: i + 1, name: p.name, team: p.team, ppg: statsMap[p.name] ?? null };
+    return { rank: i + 1, name: p.name, team: p.team, mvpPts: (pts != null && pts !== '') ? Number(pts) : null };
   }).filter(Boolean);
 
   if (!entries.length) { wrap.innerHTML = ''; return; }
 
-  const ppgDisplay = (ppg) => (ppg != null && ppg > 0) ? ppg.toFixed(1) + ' PPG' : '—';
+  // Sort by MVP pts desc; tiebreaker = team seed (lower seed # = higher rank)
+  const seeds = calcSeedsPure(config.DB.teams, config.DB.scores);
+  entries.sort((a, b) => {
+    if (a.mvpPts == null && b.mvpPts == null) return (seeds[a.team] ?? 999) - (seeds[b.team] ?? 999);
+    if (a.mvpPts == null) return 1;
+    if (b.mvpPts == null) return -1;
+    if (b.mvpPts !== a.mvpPts) return b.mvpPts - a.mvpPts;
+    return (seeds[a.team] ?? 999) - (seeds[b.team] ?? 999);
+  });
+  entries.forEach((e, i) => { e.rank = i + 1; });
+
+  const mvpPtsDisplay = (pts) => (pts != null && pts >= 0) ? `${pts} MVP Pts` : '—';
   const top3 = entries.slice(0, 3);
   const rest = entries.slice(3);
 
@@ -812,14 +819,14 @@ export function renderMvpLadder(week) {
         <div class="mvp-podium-info">
           <div class="mvp-podium-player">${escapeHtmlAttr(e.name)}</div>
           <div class="mvp-podium-team mvp-podium-team-desktop" style="color:${m.color};">${escapeHtmlAttr(e.team)}</div>
-          <div class="mvp-podium-ppg">${ppgDisplay(e.ppg)}</div>
+          <div class="mvp-podium-ppg">${mvpPtsDisplay(e.mvpPts)}</div>
         </div>
       </div>
     </div>`;
   }).join('');
 
   const listHtml = rest.map(e =>
-    `<div class="mvp-ladder-row"><span class="mvp-ladder-rank">#${e.rank}</span><span class="mvp-ladder-name">${escapeHtmlAttr(e.name)}</span><span class="mvp-ladder-team">${escapeHtmlAttr(e.team)}</span><span class="mvp-ladder-ppg">${ppgDisplay(e.ppg)}</span></div>`
+    `<div class="mvp-ladder-row"><span class="mvp-ladder-rank">#${e.rank}</span><span class="mvp-ladder-name">${escapeHtmlAttr(e.name)}</span><span class="mvp-ladder-team">${escapeHtmlAttr(e.team)}</span><span class="mvp-ladder-ppg">${mvpPtsDisplay(e.mvpPts)}</span></div>`
   ).join('');
 
   wrap.innerHTML = `
