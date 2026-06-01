@@ -89,8 +89,6 @@
     <div class="historic-banner-label">Season Complete</div>
     <div class="season-champs">
       <div><div class="champ-label">Champions</div><div class="champ-value" id="hb-champ">—</div></div>
-      <div><div class="champ-label">MVP</div><div class="champ-value" id="hb-mvp">—</div></div>
-      <div><div class="champ-label">Scoring Title</div><div class="champ-value" id="hb-scoring">—</div></div>
     </div>
   </div>
   <div class="quick-stats">
@@ -111,6 +109,13 @@
       <a class="home-section-link" href="#awards" onclick="showPage('awards');return false;"><p class="section-sub" id="home-awards-sub">Week 1 · Latest</p><h2 class="section-title">Recent Awards</h2></a>
       <div class="section-line"></div>
       <div class="home-awards-grid" id="home-awards"><div class="loading">Loading...</div></div>
+    </div>
+    <div id="home-season-awards-wrap" style="display:none;margin-top:2rem;">
+      <div class="section-line" style="margin-bottom:1rem;"></div>
+      <p class="section-sub">End of Season</p>
+      <h2 class="section-title" style="margin-bottom:1rem;">Season Awards</h2>
+      <div class="section-line"></div>
+      <div class="season-awards-grid" id="home-season-awards"></div>
     </div>
   </div>
   <footer><div class="footer-logo">Faraj League</div><div class="footer-hadith">"The best worship is awaiting the reappearance." — Holy Prophet (s.a.w.s.)</div><div class="footer-insta">@farajleague on Instagram</div></footer>
@@ -176,7 +181,9 @@
     <div class="season-awards-grid">
       <div class="season-award-card"><div class="season-award-icon">🏆</div><div class="season-award-title">Championship</div><div class="season-award-holder" id="sa-champ">Spring 2026 — In Progress</div></div>
       <div class="season-award-card"><div class="season-award-icon">⭐</div><div class="season-award-title">Most Valuable Player</div><div class="season-award-holder" id="sa-mvp">Season in progress</div></div>
-      <div class="season-award-card"><div class="season-award-icon">📊</div><div class="season-award-title">Scoring Title</div><div class="season-award-holder" id="sa-scoring">Season in progress</div></div>
+      <div class="season-award-card"><div class="season-award-icon">📊</div><div class="season-award-title">Scoring Leader</div><div class="season-award-holder" id="sa-scoring">Season in progress</div></div>
+      <div class="season-award-card"><div class="season-award-icon">🏀</div><div class="season-award-title">Playoffs MVP</div><div class="season-award-holder" id="sa-playoffs-mvp">Season in progress</div></div>
+      <div class="season-award-card"><div class="season-award-icon">🛡️</div><div class="season-award-title">Defensive Player of the Year</div><div class="season-award-holder" id="sa-dpoy">Season in progress</div></div>
     </div>
   </div>
   <footer><div class="footer-logo">Faraj League</div><div class="footer-hadith">"The best worship is awaiting the reappearance." — Holy Prophet (s.a.w.s.)</div><div class="footer-insta">@farajleague on Instagram</div></footer>

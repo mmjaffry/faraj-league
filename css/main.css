@@ -141,6 +141,20 @@ a.qs-item:hover .qs-num{color:#ddb94e;}
 .schedule-past-arrow{font-size:0.8rem;opacity:0.7;transition:transform 0.15s;}
 .schedule-section-header-toggle{cursor:pointer;user-select:none;display:flex;align-items:center;gap:0.5rem;}
 .matchups-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.1rem;}
+/* ── Playoff bracket ───────────────────────────────────────────── */
+.playoff-bracket-wrap{margin-bottom:1.1rem;}
+.playoff-bracket-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+.playoff-bracket{display:flex;flex-direction:column;min-width:440px;}
+.playoff-bracket-semis-row{display:flex;gap:1rem;}
+.playoff-bracket-col{flex:1;display:flex;flex-direction:column;}
+.playoff-bracket-final-row{display:flex;justify-content:center;}
+.playoff-bracket-final-row .playoff-bracket-col{flex:0 1 calc(50% - 0.5rem);max-width:calc(50% - 0.5rem);}
+.playoff-round-label{height:2rem;line-height:2rem;font-family:'Cinzel',serif;font-size:0.72rem;letter-spacing:0.14em;text-transform:uppercase;color:#9ab8c8;text-align:center;flex-shrink:0;}
+.playoff-conn-v{position:relative;height:32px;margin:0.2rem 0;}
+.playoff-conn-v::before{content:'';position:absolute;left:25%;right:50%;top:0;height:50%;border-left:2px solid rgba(200,168,75,0.45);border-bottom:2px solid rgba(200,168,75,0.45);border-bottom-left-radius:3px;}
+.playoff-conn-v::after{content:'';position:absolute;left:50%;right:25%;top:0;height:50%;border-right:2px solid rgba(200,168,75,0.45);border-bottom:2px solid rgba(200,168,75,0.45);border-bottom-right-radius:3px;}
+.playoff-conn-v-stem{position:absolute;left:50%;top:50%;bottom:0;width:2px;background:rgba(200,168,75,0.45);border-radius:1px;transform:translateX(-50%);}
+.playoff-bracket-wrap .mc-team-name{white-space:normal;}
 .matchup-card{background:#0e2535;border:1px solid rgba(200,168,75,0.2);border-radius:6px;overflow:hidden;}
 /* mc-* = matchup card internals */
 .mc-header{display:flex;align-items:center;justify-content:space-between;padding:0.48rem 0.9rem;background:#091c2b;border-bottom:1px solid rgba(200,168,75,0.18);font-family:'Cinzel',serif;font-size:0.7rem;letter-spacing:0.1em;text-transform:uppercase;color:#c8a84b;}
@@ -308,10 +322,14 @@ a.qs-item:hover .qs-num{color:#ddb94e;}
 .roster-player:last-child{border-bottom:none;}
 .roster-num{font-size:0.78rem;color:#2fa89a;width:22px;flex-shrink:0;}
 .season-awards-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.1rem;}
-.season-award-card{background:#0e2535;border:1px solid rgba(200,168,75,0.2);border-radius:4px;padding:1.5rem 1rem;text-align:center;}
+.season-award-card{background:#0e2535;border:1px solid rgba(200,168,75,0.2);border-radius:4px;padding:1.5rem 1rem;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;}
 .season-award-icon{font-size:1.7rem;margin-bottom:0.6rem;}
 .season-award-title{font-family:'Cinzel',serif;font-size:0.9rem;letter-spacing:0.1em;text-transform:uppercase;color:#c8a84b;margin-bottom:0.5rem;}
 .season-award-holder{font-size:0.94rem;color:#c8c0b0;}
+.sa-champ-name{display:block;font-size:0.94rem;color:#c8c0b0;margin-bottom:0.45rem;}
+.sa-champ-roster{display:flex;flex-direction:column;gap:0.15rem;margin-top:0.3rem;}
+.sa-champ-player{font-size:0.72rem;color:#8a9aaa;line-height:1.4;}
+.sa-captain-mark{color:#c8a84b;font-size:0.68rem;}
 .about-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.8rem;align-items:start;}
 .about-text p,.about-text-block{font-size:0.96rem;color:#c8c0b0;line-height:1.85;margin-bottom:0;}
 .conf-info-card{background:#0e2535;border:1px solid rgba(47,168,154,0.3);border-radius:4px;padding:1.3rem;}
@@ -439,6 +457,10 @@ footer{border-top:1px solid rgba(200,168,75,0.2);padding:1.4rem 2rem;text-align:
   .mc-score-row{flex-direction:column;align-items:center;gap:0;}
   .mc-score{font-size:1rem;}
   .mc-dash{font-size:0.65rem;margin:0;}
+  .mc-team-name{white-space:normal;}
+  /* Playoff bracket cards on mobile: hide names (winner line still shows), scores left-to-right */
+  .playoff-bracket-wrap .mc-team-name{display:none;}
+  .playoff-bracket-wrap .mc-score-row{flex-direction:row;align-items:center;gap:0.1rem;}
 }
 
 /* ── Desktop 110% scale ──────────────────────────────────────── */

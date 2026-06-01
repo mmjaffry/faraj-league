@@ -27,8 +27,11 @@ function getDisplayWeek() {
 }
 // Standings use config.DB.scores (from games.home_score, away_score). Score derivation in
 // admin-game-stats Edge Function updates games when stat sheet is saved; getSeasonData brings them in.
+function regularSeasonScores() {
+  return (config.DB.scores || []).filter(g => !config.DB.playoffWeeks?.[String(g.week)]);
+}
 export function calcStandings() {
-  return calcStandingsPure(config.DB.teams, config.DB.scores);
+  return calcStandingsPure(config.DB.teams, regularSeasonScores());
 }
 function buildWeekDropdown(elId, includeAll, maxWeek) {
   const max = maxWeek != null ? maxWeek : config.TOTAL_WEEKS;
@@ -144,11 +147,7 @@ export function renderAll(adminMode = false) {
   if (hb) hb.style.display = showHistoric ? 'block' : 'none';
   if (showHistoric && sa) {
     const hbChamp = document.getElementById('hb-champ');
-    const hbMvp = document.getElementById('hb-mvp');
-    const hbScoring = document.getElementById('hb-scoring');
     if (hbChamp) hbChamp.textContent = sa.champ || '—';
-    if (hbMvp) hbMvp.textContent = sa.mvp || '—';
-    if (hbScoring) hbScoring.textContent = sa.scoring || '—';
   }
 
   buildScoresWeekDropdown();
@@ -224,7 +223,7 @@ export function renderHome() {
   if (awardsSub) awardsSub.textContent = `Week ${displayWeek} · ${subLabel}`;
 
   const rec = calcStandings();
-  const seeds = calcSeedsPure(config.DB.teams, config.DB.scores);
+  const seeds = calcSeedsPure(config.DB.teams, regularSeasonScores());
   const homeStandings = document.getElementById('home-standings');
   if (!homeStandings) return;
   homeStandings.innerHTML = (getConferences().map(c => c.id || c.name)).map(conf => {
@@ -240,16 +239,48 @@ export function renderHome() {
   ];
   const homeMatchups = document.getElementById('home-matchups');
   const homeAwards = document.getElementById('home-awards');
-  if (homeMatchups) homeMatchups.innerHTML = games.map((g, i) => buildMatchupCard({ ...g, game: g.game || i + 1 }, g.gameId || '')).join('');
+  if (homeMatchups) {
+    if (config.DB.playoffWeeks?.[String(displayWeek)]) {
+      homeMatchups.classList.remove('matchups-grid');
+      homeMatchups.innerHTML = renderPlayoffBracket(displayWeek);
+    } else {
+      homeMatchups.classList.add('matchups-grid');
+      homeMatchups.innerHTML = games.map((g, i) => buildMatchupCard({ ...g, game: g.game || i + 1 }, g.gameId || '')).join('');
+    }
+  }
   if (homeAwards) {
     const akhlaqPost = wa.akhlaq_post_url ? `<div class="akhlaq-post-wrap" style="margin-top:0.75rem;text-align:center;"><a href="${wa.akhlaq_post_url.replace(/"/g, '&quot;')}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1.1rem;background:rgba(200,168,75,0.1);border:1px solid rgba(200,168,75,0.3);border-radius:4px;color:#c8a84b;font-size:0.8rem;letter-spacing:0.12em;text-transform:uppercase;text-decoration:none;">▶ Watch on Instagram</a></div>` : '';
     homeAwards.innerHTML = `<div class="award-card akhlaq-card home-award-link"><div class="akhlaq-inner"><div class="akhlaq-medal">☽</div><div><div class="award-label">${akhlaqLabel(displayWeek)}</div><div class="award-winner">${wa.akhlaq || pending()}</div><div class="award-winner-sub">Exemplary character & brotherhood</div></div></div>${akhlaqPost}</div>`;
+  }
+
+  const seasonAwardsWrap = document.getElementById('home-season-awards-wrap');
+  const seasonAwardsGrid = document.getElementById('home-season-awards');
+  const saFull = config.DB.awards?.find(a => a.champ);
+  if (seasonAwardsWrap && seasonAwardsGrid && saFull?.champ) {
+    const champTeam = (config.DB.teams || []).find(t => t.name === saFull.champ);
+    const captain = champTeam?.captain || '';
+    const roster = champTeam?.roster || [];
+    const rosterHtml = roster.length
+      ? `<div class="sa-champ-roster">${roster.map(p => `<span class="sa-champ-player">${p.name}${p.name === captain ? ' <span class="sa-captain-mark">(C)</span>' : ''}</span>`).join('')}</div>`
+      : '';
+    const playoffsMvp = config.DB.contentBlocks?.playoffs_mvp || '—';
+    const dpoy = config.DB.contentBlocks?.dpoy || '—';
+    seasonAwardsGrid.innerHTML = `
+      <div class="season-award-card"><div class="season-award-icon">🏆</div><div class="season-award-title">Championship</div><div class="season-award-holder"><span class="sa-champ-name">${saFull.champ}</span>${rosterHtml}</div></div>
+      <div class="season-award-card"><div class="season-award-icon">⭐</div><div class="season-award-title">Most Valuable Player</div><div class="season-award-holder">${saFull.mvp || '—'}</div></div>
+      <div class="season-award-card"><div class="season-award-icon">📊</div><div class="season-award-title">Scoring Leader</div><div class="season-award-holder">${saFull.scoring || '—'}</div></div>
+      <div class="season-award-card"><div class="season-award-icon">🏀</div><div class="season-award-title">Playoffs MVP</div><div class="season-award-holder">${playoffsMvp}</div></div>
+      <div class="season-award-card"><div class="season-award-icon">🛡️</div><div class="season-award-title">Defensive Player of the Year</div><div class="season-award-holder">${dpoy}</div></div>
+    `;
+    seasonAwardsWrap.style.display = 'block';
+  } else if (seasonAwardsWrap) {
+    seasonAwardsWrap.style.display = 'none';
   }
 }
 
 export function renderStandings() {
   const rec = calcStandings();
-  const seeds = calcSeedsPure(config.DB.teams, config.DB.scores);
+  const seeds = calcSeedsPure(config.DB.teams, regularSeasonScores());
   const idAttr = (id) => typeof id === 'string' ? `'${String(id).replace(/'/g, "\\'")}'` : id;
   const confGrid = document.querySelector('#page-standings .conf-grid, .conf-grid');
   const conferences = getConferences();
@@ -504,6 +535,51 @@ function scheduleWeekTitle(w) {
   return (c != null && String(c).trim() !== '') ? String(c).trim() : `Week ${w}`;
 }
 
+function renderPlayoffBracket(w) {
+  const allGames = (config.DB.scores || []).filter(g => g.week === w);
+  const g1 = allGames.find(g => g.game === 1);
+  const g2 = allGames.find(g => g.game === 2);
+  const g3 = allGames.find(g => g.game === 3);
+
+  const weekDate = allGames.find(g => g.scheduled_at)?.scheduled_at;
+  const weekDateStr = weekDate ? ` · ${formatGameDate(weekDate)}` : '';
+  const title = scheduleWeekTitle(w);
+
+  const placeholder = (label) =>
+    `<div class="matchup-card" style="padding:1.4rem;text-align:center;color:#555;font-size:0.82rem;display:flex;align-items:center;justify-content:center;">${label}</div>`;
+
+  const card1 = g1 ? buildMatchupCard(g1, g1.gameId || '') : placeholder('TBD');
+  const card2 = g2 ? buildMatchupCard(g2, g2.gameId || '') : placeholder('TBD');
+  const card3 = g3 ? buildMatchupCard(g3, g3.gameId || '') : placeholder('TBD');
+
+  return `<div class="playoff-bracket-wrap" data-week="${w}">
+    <div style="font-family:'Cinzel',serif;font-size:0.84rem;letter-spacing:0.18em;text-transform:uppercase;color:#c8a84b;margin-bottom:0.9rem;">${title}${weekDateStr}</div>
+    <div class="playoff-bracket-scroll">
+      <div class="playoff-bracket">
+        <div class="playoff-bracket-semis-row">
+          <div class="playoff-bracket-col">
+            <div class="playoff-round-label">Conference Final</div>
+            ${card1}
+          </div>
+          <div class="playoff-bracket-col">
+            <div class="playoff-round-label">Conference Final</div>
+            ${card2}
+          </div>
+        </div>
+        <div class="playoff-conn-v" aria-hidden="true">
+          <div class="playoff-conn-v-stem"></div>
+        </div>
+        <div class="playoff-bracket-final-row">
+          <div class="playoff-bracket-col">
+            <div class="playoff-round-label">Championship</div>
+            ${card3}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 export function renderSchedule(focusWeek, teamFilter) {
   const allEl = document.getElementById('schedule-all-content');
   const prevEl = document.getElementById('schedule-prev');
@@ -532,6 +608,9 @@ export function renderSchedule(focusWeek, teamFilter) {
     return `<div data-week="${w}" style="margin-bottom:1.1rem;"><div style="font-family:'Cinzel',serif;font-size:0.84rem;letter-spacing:0.18em;text-transform:uppercase;color:#c8a84b;margin-bottom:0.7rem;">${label}${weekDateStr}</div><div class="matchups-grid">${cards.join('')}</div></div>`;
   };
 
+  const renderWeekContent = (w, label) =>
+    (config.DB.playoffWeeks?.[String(w)]) ? renderPlayoffBracket(w) : renderWeekBlock(w, label);
+
   const sectionHeader = (label, isCurrent) =>
     `<div class="schedule-section-header${isCurrent ? ' schedule-section-header-current' : ''}"><span>${label}</span></div>`;
 
@@ -549,16 +628,16 @@ export function renderSchedule(focusWeek, teamFilter) {
     if (cur > 1) {
       html += `<div class="schedule-section-header schedule-section-header-toggle" id="schedule-past-toggle"><span class="schedule-past-arrow">▸</span><span>Past</span></div>`;
       html += `<div id="schedule-past-body" style="display:none;">`;
-      for (let w = 1; w < cur; w++) html += renderWeekBlock(w, scheduleWeekTitle(w));
+      for (let w = 1; w < cur; w++) html += renderWeekContent(w, scheduleWeekTitle(w));
       html += `</div>`;
     }
     // Current
     html += sectionHeader('Current Week', true);
-    html += renderWeekBlock(cur, scheduleWeekTitle(cur));
+    html += renderWeekContent(cur, scheduleWeekTitle(cur));
     // Upcoming
     if (cur < total) {
       html += sectionHeader('Upcoming', false);
-      for (let w = cur + 1; w <= total; w++) html += renderWeekBlock(w, scheduleWeekTitle(w));
+      for (let w = cur + 1; w <= total; w++) html += renderWeekContent(w, scheduleWeekTitle(w));
     }
     allEl.innerHTML = html;
     // Wire Past toggle
@@ -579,7 +658,7 @@ export function renderSchedule(focusWeek, teamFilter) {
     if (nextEl) nextEl.style.display = 'none';
     if (!focusEl) return;
     focusEl.style.display = '';
-    focusEl.innerHTML = renderWeekBlock(focusWeek, `${scheduleWeekTitle(focusWeek)}${focusWeek === config.CURRENT_WEEK ? ' — Current' : ''}`);
+    focusEl.innerHTML = renderWeekContent(focusWeek, `${scheduleWeekTitle(focusWeek)}${focusWeek === config.CURRENT_WEEK ? ' — Current' : ''}`);
   }
 }
 
@@ -605,7 +684,7 @@ export function renderTeams() {
   const teamsGrid = document.getElementById('teams-grid');
   if (!teamsGrid) return;
   const rec = calcStandings();
-  const seeds = calcSeedsPure(config.DB.teams, config.DB.scores);
+  const seeds = calcSeedsPure(config.DB.teams, regularSeasonScores());
   const idAttr = (id) => typeof id === 'string' ? `'${String(id).replace(/'/g, "\\'")}'` : id;
   const effectiveCaptain = (t) => {
     const cap = (t.captain || '').trim();
@@ -745,9 +824,27 @@ export function renderAwards(week) {
   const saChamp = document.getElementById('sa-champ');
   const saMvp = document.getElementById('sa-mvp');
   const saScoring = document.getElementById('sa-scoring');
-  if (saChamp) saChamp.textContent = sa.champ || `${config.currentSeasonLabel} — In Progress`;
+  const saPlayoffsMvp = document.getElementById('sa-playoffs-mvp');
+  const saDpoy = document.getElementById('sa-dpoy');
+  // Championship — show team name + roster with captain marked
+  if (saChamp) {
+    const champName = sa.champ || '';
+    if (champName) {
+      const champTeam = (config.DB.teams || []).find(t => t.name === champName);
+      const captain = champTeam?.captain || '';
+      const roster = champTeam?.roster || [];
+      const rosterHtml = roster.length
+        ? `<div class="sa-champ-roster">${roster.map(p => `<span class="sa-champ-player">${p.name}${p.name === captain ? ' <span class="sa-captain-mark">(C)</span>' : ''}</span>`).join('')}</div>`
+        : '';
+      saChamp.innerHTML = `<span class="sa-champ-name">${champName}</span>${rosterHtml}`;
+    } else {
+      saChamp.textContent = `${config.currentSeasonLabel} — In Progress`;
+    }
+  }
   if (saMvp) saMvp.textContent = sa.mvp || 'Season in progress';
   if (saScoring) saScoring.textContent = sa.scoring || 'Season in progress';
+  if (saPlayoffsMvp) saPlayoffsMvp.textContent = config.DB.contentBlocks?.playoffs_mvp || 'Season in progress';
+  if (saDpoy) saDpoy.textContent = config.DB.contentBlocks?.dpoy || 'Season in progress';
   renderMvpLadder(w);
 }
 
@@ -785,7 +882,7 @@ export function renderMvpLadder(week) {
   if (!entries.length) { wrap.innerHTML = ''; return; }
 
   // Sort by MVP pts desc; tiebreaker = team seed (lower seed # = higher rank)
-  const seeds = calcSeedsPure(config.DB.teams, config.DB.scores);
+  const seeds = calcSeedsPure(config.DB.teams, regularSeasonScores());
   entries.sort((a, b) => {
     if (a.mvpPts == null && b.mvpPts == null) return (seeds[a.team] ?? 999) - (seeds[b.team] ?? 999);
     if (a.mvpPts == null) return 1;
