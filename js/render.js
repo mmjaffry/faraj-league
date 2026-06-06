@@ -671,8 +671,11 @@ export function renderScores(week) {
     if (!played.length) return `<div class="card" style="text-align:center;padding:1.4rem;margin-bottom:0.9rem;"><div style="font-size:0.9rem;color:#c8c0b0;font-style:italic;">Week ${w} — No results yet.</div></div>`;
     const weekDate = games.find(g => g.scheduled_at)?.scheduled_at;
     const weekDateStr = weekDate ? ` · ${formatGameDate(weekDate)}` : '';
-    const cards = played.map(g => buildMatchupCard(g, g.gameId || ''));
-    return `<div style="margin-bottom:1.1rem;"><div style="font-family:'Cinzel',serif;font-size:0.84rem;letter-spacing:0.18em;text-transform:uppercase;color:#c8a84b;margin-bottom:0.7rem;">Week ${w}${w == config.CURRENT_WEEK ? ' — Current' : ''}${weekDateStr}</div><div class="matchups-grid">${cards.join('')}</div></div>`;
+    const isPlayoff = config.DB.playoffWeeks?.[String(w)];
+    const gamesHtml = isPlayoff
+      ? renderPlayoffBracket(w)
+      : `<div class="matchups-grid">${played.map(g => buildMatchupCard(g, g.gameId || '')).join('')}</div>`;
+    return `<div style="margin-bottom:1.1rem;"><div style="font-family:'Cinzel',serif;font-size:0.84rem;letter-spacing:0.18em;text-transform:uppercase;color:#c8a84b;margin-bottom:0.7rem;">Week ${w}${w == config.CURRENT_WEEK ? ' — Current' : ''}${weekDateStr}</div>${gamesHtml}</div>`;
   };
   const playedWeeks = [...new Set((config.DB.scores || []).filter(g => g.s1 !== '' && g.s2 !== '').map(g => g.week))].sort((a, b) => a - b);
   el.innerHTML = week === 'all'
@@ -769,28 +772,55 @@ export function renderStats(teamFilter) {
   const defs = config.DB.statDefinitions || [];
   const sub = document.getElementById('stats-section-sub');
   if (sub) sub.textContent = config.currentSeasonLabel + (defs.length > 1 ? '' : ' · Points Only');
-  const allRows = (config.DB.stats || [])
-    .filter(s => s.total > 0 || Object.values(s.statValues || {}).some(v => v > 0))
-    .sort((a, b) => b.total - a.total);
+  const pointsDef = defs.find(d => d.slug === 'points');
+  const calcPpg = r => r.gp > 0 ? (pointsDef ? (r.statValues?.[pointsDef.id] || 0) : r.total) / r.gp : 0;
+  const totalRegGames = config.DB.totalRegGames || 0;
+  const standingsRec = calcStandings();
+
+  // Cross-conference team comparison: wins → point differential → points for.
+  // Treats all teams as one pool so conference seed numbers don't distort the tiebreaker.
+  const teamRank = (teamName) => {
+    const s = standingsRec[teamName] || { w: 0, pf: 0, pa: 0 };
+    return { w: s.w, pd: s.pf - s.pa, pf: s.pf };
+  };
+  const compareTeams = (nameA, nameB) => {
+    const a = teamRank(nameA), b = teamRank(nameB);
+    if (b.w !== a.w) return b.w - a.w;
+    if (b.pd !== a.pd) return b.pd - a.pd;
+    return b.pf - a.pf;
+  };
+
+  const filteredStats = (config.DB.stats || [])
+    .filter(s => s.total > 0 || Object.values(s.statValues || {}).some(v => v > 0));
+
+  // Two-tier sort: players who missed ≤1 reg season game → by PPG (tiebreaker: cross-conf team rank);
+  // players who missed ≥2 reg season games → by total points, shown below.
+  const withMissed = filteredStats.map(r => ({ ...r, missed: totalRegGames - (r.regGp || 0) }));
+  const roundPpg = r => Math.round(calcPpg(r) * 10) / 10;
+  const groupA = withMissed.filter(r => r.missed <= 1).sort((a, b) => {
+    const diff = roundPpg(b) - roundPpg(a);
+    if (diff !== 0) return diff;
+    return compareTeams(a.team, b.team);
+  });
+  const groupB = withMissed.filter(r => r.missed > 1).sort((a, b) => b.total - a.total);
+  const allRows = totalRegGames > 0 ? [...groupA, ...groupB] : filteredStats.sort((a, b) => b.total - a.total);
+
   if (!defs.length) {
     if (leadersWrap) leadersWrap.innerHTML = '';
     if (filterWrap) filterWrap.innerHTML = '';
     wrap.innerHTML = `<div style="padding:1.8rem;text-align:center;font-style:italic;color:#c8c0b0;font-size:0.9rem;">No stat types defined — add them in the admin Stats tab.</div>`;
     return;
   }
-  const standings = calcStandings();
-  const teamRec = name => { const s = standings[name]; return s ? ` (${s.w}-${s.l})` : ''; };
+  const teamRec = name => { const s = standingsRec[name]; return s ? ` (${s.w}-${s.l})` : ''; };
   if (filterWrap) {
     const teams = [...new Set(allRows.map(r => r.team).filter(Boolean))].sort();
-    const rec = teamFilter ? standings[teamFilter] : null;
+    const rec = teamFilter ? standingsRec[teamFilter] : null;
     const recSpan = rec ? `<span style="flex:1;text-align:center;color:#c8a84b;font-family:'Cinzel',serif;font-size:0.88rem;letter-spacing:0.06em;">${escapeHtmlAttr(teamFilter)} &middot; ${rec.w}-${rec.l}</span>` : '';
     filterWrap.innerHTML = `<div class="week-dropdown-wrap"><span class="week-dropdown-label">Team</span><select class="week-dropdown" id="stats-team-filter" onchange="renderStats(this.value)"><option value="">All Teams</option>${teams.map(t => `<option value="${escapeHtmlAttr(t)}"${t === teamFilter ? ' selected' : ''}>${escapeHtmlAttr(t)}</option>`).join('')}</select>${recSpan}</div>`;
     const sel = document.getElementById('stats-team-filter');
     if (sel) sel.value = teamFilter;
   }
   const rows = (teamFilter ? allRows.filter(r => r.team === teamFilter) : allRows).slice(0, 15);
-  const pointsDef = defs.find(d => d.slug === 'points');
-  const calcPpg = r => r.gp > 0 ? (pointsDef ? (r.statValues?.[pointsDef.id] || 0) : r.total) / r.gp : 0;
   if (leadersWrap) {
     const ranked = rows.filter(r => r.gp > 0)
       .map(r => ({ ...r, ppg: calcPpg(r) }))

@@ -88,22 +88,33 @@ function transformSeasonData(raw) {
     playerToTeamId[r.player_id] = r.team_id;
   });
 
-  // Exclude playoff games from stats aggregation
+  // Playoff stats count towards individual player stats but not standings/records.
+  // Standings filtering is handled separately in render.js via regularSeasonScores().
   const playoffGameIds = new Set(
     (games || []).filter(g => playoffWeeks[String(g.week)]).map(g => g.id)
   );
-  const regularGames = (games || []).filter(g => !playoffGameIds.has(g.id));
-  const regularGameStatValues = (game_stat_values || []).filter(gsv => !playoffGameIds.has(gsv.game_id));
+
+  // Total distinct regular season WEEKS that have stat data.
+  // Players play one game per week, so this equals the max games any player could have played.
+  const gameWeekMap = {};
+  (games || []).forEach(g => { gameWeekMap[g.id] = g.week; });
+  const totalRegGames = new Set(
+    (game_stat_values || [])
+      .filter(gsv => !playoffGameIds.has(gsv.game_id))
+      .map(gsv => gameWeekMap[gsv.game_id])
+      .filter(w => w != null)
+  ).size;
 
   const stats = aggregateStats({
-    game_stat_values: regularGameStatValues,
+    game_stat_values,
     player_stat_values,
     stat_definitions,
     rosters,
-    games: regularGames,
+    games,
     players,
     rosterToTeam,
     playerToTeamId,
+    playoffGameIds,
   });
 
   const sponsorOverrides = {};
@@ -180,6 +191,7 @@ function transformSeasonData(raw) {
     draftTeamOrder,
     scheduleWeekLabels,
     playoffWeeks,
+    totalRegGames,
   };
 }
 
