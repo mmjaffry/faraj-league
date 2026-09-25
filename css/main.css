@@ -352,13 +352,32 @@ a.qs-item:hover .qs-num{color:#ddb94e;}
 .tier-title{background:rgba(200,168,75,0.12);color:#c8a84b;}
 .tier-conf{background:rgba(47,168,154,0.1);color:#2fa89a;}
 .tier-community{background:rgba(245,240,228,0.05);color:#c8c0b0;}
+/* Live game state, shown where the winner tag goes once the game is final. */
+.mc-live-tag{display:flex;align-items:center;justify-content:center;gap:0.4rem;margin-top:0.5rem;
+  font-family:'Lato',sans-serif;font-size:0.78rem;letter-spacing:0.12em;text-transform:uppercase;
+  color:#2fa89a;font-variant-numeric:tabular-nums;}
+.mc-live-tag.mc-live-half{color:#c8a84b;}
+.mc-live-dot{width:7px;height:7px;border-radius:50%;background:#2fa89a;flex:0 0 auto;
+  animation:mc-live-pulse 1.6s ease-in-out infinite;}
+.mc-live-half .mc-live-dot{background:#c8a84b;animation:none;}
+@keyframes mc-live-pulse{0%,100%{opacity:1;}50%{opacity:0.25;}}
+@media (prefers-reduced-motion:reduce){.mc-live-dot{animation:none;}}
 .sponsor-logo-placeholder{font-size:0.82rem;color:rgba(200,168,75,0.5);font-style:italic;}
 .sponsor-details{font-size:0.9rem;color:#c8c0b0;line-height:1.6;white-space:pre-line;}
+/* Sponsor name highlights, keyed by slot rather than by brand, so a season's
+   own sponsors are styled without any brand name living in the code. */
+.brand-sponsor-title{color:#c8a84b;font-weight:600;}
+.brand-sponsor-a{color:#A41D09;font-weight:600;text-shadow:0 0 6px rgba(164,29,9,0.35);}
+.brand-sponsor-b{color:#89B526;font-weight:600;}
+/* Legacy classes kept so any rich text already saved with them still renders. */
 .brand-toyomotors{color:#A41D09;font-weight:600;text-shadow:0 0 6px rgba(164,29,9,0.35);}
 .brand-xtreme{color:#89B526;font-weight:600;}
 .brand-wellness{color:#89B526;font-weight:600;}
 
 /* Dark-page overrides */
+#page-stats .brand-sponsor-b,
+#page-standings .brand-sponsor-b,
+.conf-acc-title .brand-sponsor-b,
 #page-stats .brand-wellness,
 #page-standings .brand-wellness,
 .conf-acc-title .brand-wellness{text-shadow:0 0 1px rgba(255,255,255,0.25);}
@@ -415,7 +434,14 @@ footer{border-top:1px solid rgba(200,168,75,0.2);padding:1.4rem 2rem;text-align:
 .footer-insta{font-size:0.82rem;color:#2fa89a;letter-spacing:0.1em;margin-top:0.3rem;}
 .pending{color:#c8c0b0;font-style:italic;}
 .loading{text-align:center;padding:2rem;font-size:0.88rem;color:#c8c0b0;font-style:italic;}
-.hero-league-logo{width:340px;height:340px;mix-blend-mode:screen;margin:0 auto;display:block;}
+.hero-league-logo{margin:0 auto;display:block;}
+/* Which logo a season shows, and so which of these applies, is lib/season-logo.js. */
+/* The original circular badge (inaugural season): exactly the look it always had. */
+.hero-league-logo--badge{width:340px;height:340px;mix-blend-mode:screen;}
+/* The City Edition mark: airy calligraphy rather than a solid disc, so it sits a
+   little smaller. Sizes are the approved mockup's: 300px, 250px on phones. */
+.hero-league-logo--mark{width:300px;max-width:82%;height:auto;margin-top:0.4rem;}
+@media(max-width:700px){.hero-league-logo--mark{width:250px;}}
 /* Stacked lines: eyebrow then logo — centered on all viewports (avoids desktop row misalignment) */
 #title-sponsor-banner{display:flex;flex-direction:column;align-items:center;width:100%;margin-top:0.65rem;box-sizing:border-box;}
 .title-sponsor-bar{background:transparent;border:none;border-radius:0;padding:0;margin:0;display:flex;flex-direction:column;flex-wrap:nowrap;align-items:center;justify-content:center;gap:0.45rem;width:100%;max-width:100%;box-sizing:border-box;}

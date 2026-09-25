@@ -6,6 +6,7 @@
 <title>Faraj League — Admin</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Lato:wght@300;400;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="../css/main.css?v=20260921a">
+<link rel="stylesheet" href="css/live-tracker.css?v=20260923a">
 <link rel="stylesheet" href="css/admin-overlays.css">
 <style>
 /* Admin-only: login, floating button, drawer */
@@ -100,7 +101,7 @@
     <div class="hero-bg"></div><div class="hero-geo"></div>
     <div class="hero-content">
       <div class="hero-badge" id="hero-badge">Spring 2026 · Inaugural Season</div>
-      <img src="../faraj-logo.png" class="hero-league-logo" alt="Faraj League">
+      <img src="../images/logos/fall2026-city-edition.svg" id="hero-league-logo" class="hero-league-logo hero-league-logo--mark" alt="Faraj Basketball League — City Edition">
       <div id="title-sponsor-banner"></div>
       <div class="hero-divider"></div>
       <p class="hero-hadith-ar">أفْضَلُ العِبادةِ انتِظارُ الفَرَجْ</p>
@@ -293,6 +294,13 @@ TBD</div>
           </div>
         </div>
       </div>
+    </div>
+    <div class="section" style="margin-top:2rem;">
+      <p class="section-sub">Admin</p>
+      <h2 class="section-title">Manage sponsors</h2>
+      <div class="section-line"></div>
+      <p style="color:#c8c0b0;font-size:0.85rem;margin:0.75rem 0;">Add, edit or remove this season's sponsors. Removing one leaves the slot empty on this season only — other seasons keep theirs.</p>
+      <div id="sponsors-admin-content"></div>
     </div>
   </div>
   <footer><div class="footer-logo">Faraj League</div><div class="footer-hadith">"The best worship is awaiting the reappearance." — Holy Prophet (s.a.w.s.)</div><div class="footer-insta">@farajleague on Instagram</div></footer>

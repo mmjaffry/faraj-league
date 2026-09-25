@@ -3,8 +3,10 @@
  */
 
 import { config } from './config.js';
-import { fetchSeasons, fetchSeasonData, deriveWeeks, applySponsorOverrides } from './data.js';
+import { fetchSeasons, fetchSeasonData, fetchGameScores, deriveWeeks, applySponsorOverrides, fetchChampionCards } from './data.js';
 import { sortSeasons, activeSeasonSlug } from '../lib/seasons.js';
+import { liveFingerprint, scoresFingerprint, shouldRepaint, SCORE_POLL_MS, FULL_POLL_MS } from '../lib/live-sync.js';
+import { statusLine, isInProgress } from '../lib/game-clock.js';
 import {
   renderAll,
   renderSchedule,
@@ -63,12 +65,55 @@ function populateSeasonDropdown(seasons, defaultSlug) {
   });
 }
 
+/**
+ * The champions trophy appears twice — at the top of the awards page and as
+ * the last section of the home page. It is WebGL and loads three.js, so each
+ * copy is only built when it is about to be seen, once, and both share one
+ * read of the champion data.
+ */
+const trophiesStarted = new Set();
+let championCards = null;
+function mountTrophyIn(section) {
+  if (!section || trophiesStarted.has(section)) return;
+  trophiesStarted.add(section);
+  if (!championCards) championCards = fetchChampionCards();
+  Promise.all([import('./trophy.js'), championCards])
+    .then(([mod, res]) => {
+      if (res.error) {
+        console.warn('Trophy: champion data unavailable', res.error);
+        championCards = null;   // the next trophy to mount asks again
+      }
+      return mod.mountTrophy(section, res.data || []);
+    })
+    .catch(err => {
+      console.warn('Trophy failed to load', err);
+      trophiesStarted.delete(section);   // try again next time it is needed
+    });
+}
+
+/**
+ * The home page's trophy is its last section, and most visitors land on home
+ * without ever scrolling that far — so three.js is fetched only once the
+ * section comes within about a screen of view, not on every page load.
+ */
+function watchHomeTrophy() {
+  const section = document.getElementById('home-trophy-scroll');
+  if (!section || !('IntersectionObserver' in window)) { mountTrophyIn(section); return; }
+  const io = new IntersectionObserver((entries) => {
+    if (!entries.some(e => e.isIntersecting)) return;
+    io.disconnect();
+    mountTrophyIn(section);
+  }, { rootMargin: '0px 0px 900px 0px' });
+  io.observe(section);
+}
+
 function showPage(id, skipPush = false) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
   const pageEl = document.getElementById('page-' + id);
   if (!pageEl) { showPage('home', skipPush); return; }
   pageEl.classList.add('active');
+  if (id === 'awards') mountTrophyIn(document.getElementById('trophy-scroll'));
   document.querySelectorAll('.nav-tab').forEach(b => {
     if (b.getAttribute('href') === '#' + id) b.classList.add('active');
   });
@@ -115,6 +160,146 @@ document.addEventListener('click', e => {
   if (e.target.closest('#home-awards')) showPage('awards');
 });
 
+/**
+ * Push a `fetchSeasonData` result into `config.DB` and the derived runtime
+ * state. Shared by the initial load, the season picker and the live poll so
+ * they cannot drift apart.
+ */
+function applySeasonData(data, slug) {
+  const { season, teams, scores, awards, stats, gameStatValues, statDefinitions, sponsorOverrides,
+    mediaItems, mediaSlots, contentBlocks, draftBank, draftTeamOrder, scheduleWeekLabels,
+    playoffWeeks, totalRegGames } = data;
+  config.DB = {
+    teams, scores, awards, stats,
+    gameStatValues: gameStatValues || {},
+    statDefinitions: statDefinitions || [],
+    mediaItems: mediaItems || [],
+    mediaSlots: mediaSlots || {},
+    contentBlocks: contentBlocks || {},
+    draftBank: draftBank || [],
+    draftTeamOrder: draftTeamOrder || [],
+    scheduleWeekLabels: scheduleWeekLabels || {},
+    playoffWeeks: playoffWeeks || {},
+    totalRegGames: totalRegGames || 0,
+  };
+  applySponsorOverrides(sponsorOverrides);
+  const derived = deriveWeeks(scores, season);
+  config.TOTAL_WEEKS = derived.TOTAL_WEEKS;
+  config.CURRENT_WEEK = (season?.current_week != null ? season.current_week : derived.CURRENT_WEEK);
+  config.currentSeasonLabel = season?.label || 'Spring 2026';
+  config.currentSeasonIsCurrent = season?.is_current ?? true;
+  config.currentSeasonSlug = season?.slug || slug;
+  config.currentSeasonId = season?.id || null;
+}
+
+// ---- Live refresh -------------------------------------------------------
+// Stats are written by the admin tracker while a game is being played, so the
+// page re-reads the season on a timer and repaints only when something moved.
+let liveSignature = '';
+let scoreSignature = '';
+let scoreTimer = null;
+let fullTimer = null;
+let clockTimer = null;
+let polling = false;
+
+/** True while the visitor has something open that a repaint would disturb. */
+function pageIsBusy() {
+  const overlay = document.getElementById('box-score-fullscreen');
+  if (overlay && overlay.style.display === 'flex') return true;
+  if (document.getElementById('nav-drawer')?.classList.contains('open')) return true;
+  return false;
+}
+
+/** Re-read the whole season and repaint if anything a visitor sees has moved. */
+async function refreshSeason() {
+  const slug = config.currentSeasonSlug;
+  if (!slug || polling) return;
+  polling = true;
+  try {
+    const res = await fetchSeasonData(slug);
+    if (res.error || !res.data) return;
+    // The visitor may have switched seasons while this was in flight.
+    if (config.currentSeasonSlug !== slug) return;
+
+    const next = liveFingerprint(res.data);
+    if (!shouldRepaint({ previous: liveSignature, next, busy: pageIsBusy() })) {
+      if (liveSignature === '') liveSignature = next;
+      return;
+    }
+    liveSignature = next;
+    applySeasonData(res.data, slug);
+    scoreSignature = scoresFingerprint(res.data.scores);
+    renderAll();
+    tickLiveClocks();
+  } finally {
+    polling = false;
+  }
+}
+
+/**
+ * Cheap probe: one small query for this season's scores. Only when it moves is
+ * the full season re-read. Lets scores appear within seconds without running a
+ * dozen queries every few seconds.
+ */
+async function probeScores() {
+  if (document.hidden || polling) return;
+  const seasonId = config.currentSeasonId;
+  if (!seasonId) return;
+  const res = await fetchGameScores(seasonId);
+  if (res.error || !res.data) return;
+
+  const next = scoresFingerprint(res.data);
+  if (next === scoreSignature) return;
+  if (pageIsBusy()) return;   // picked up on the next probe
+  scoreSignature = next;
+  await refreshSeason();
+}
+
+/** Re-read everything on a slower beat, for changes the probe cannot see. */
+async function fullRefresh() {
+  if (document.hidden) return;
+  await refreshSeason();
+  scoreSignature = scoresFingerprint(config.DB.scores);
+}
+
+/**
+ * Advance the clock on any live game, once a second.
+ *
+ * Purely local: each card's clock is extrapolated from the anchor the tracker
+ * stored, so it ticks smoothly between polls instead of freezing until the
+ * next one. No network, no re-render.
+ */
+function tickLiveClocks() {
+  const nodes = document.querySelectorAll('[data-live-clock]');
+  if (!nodes.length) return;
+  const byId = {};
+  (config.DB.scores || []).forEach(g => { if (g.gameId) byId[g.gameId] = g; });
+  const now = Date.now();
+  nodes.forEach(el => {
+    const g = byId[el.dataset.liveClock];
+    if (!g || !isInProgress(g)) return;
+    const text = statusLine(g, now);
+    if (text && el.textContent !== text) el.textContent = text;
+  });
+}
+
+function startLiveRefresh() {
+  clearInterval(scoreTimer);
+  clearInterval(fullTimer);
+  clearInterval(clockTimer);
+  scoreTimer = setInterval(probeScores, SCORE_POLL_MS);
+  fullTimer = setInterval(fullRefresh, FULL_POLL_MS);
+  clockTimer = setInterval(tickLiveClocks, 1000);
+
+  // Every way a phone comes back to this page. Mobile browsers suspend timers
+  // in the background, and iOS restores from the back-forward cache without
+  // firing visibilitychange — so pageshow matters as much as the other two.
+  const wake = () => { if (!document.hidden) { tickLiveClocks(); probeScores(); } };
+  document.addEventListener('visibilitychange', wake);
+  window.addEventListener('focus', wake);
+  window.addEventListener('pageshow', wake);
+}
+
 async function changeSeason(val) {
   if (!val || val === config.currentSeasonSlug) return;
   clearError();
@@ -123,15 +308,12 @@ async function changeSeason(val) {
     showError('Could not load season data. Please refresh.');
     return;
   }
-  const { season, teams, scores, awards, stats, gameStatValues, statDefinitions, sponsorOverrides, mediaItems, mediaSlots, contentBlocks, draftBank, draftTeamOrder, scheduleWeekLabels, playoffWeeks: playoffWeeksCS, totalRegGames: totalRegGamesCS } = dataRes.data;
-  config.DB = { teams, scores, awards, stats, gameStatValues: gameStatValues || {}, statDefinitions: statDefinitions || [], mediaItems: mediaItems || [], mediaSlots: mediaSlots || {}, contentBlocks: contentBlocks || {}, draftBank: draftBank || [], draftTeamOrder: draftTeamOrder || [], scheduleWeekLabels: scheduleWeekLabels || {}, playoffWeeks: playoffWeeksCS || {}, totalRegGames: totalRegGamesCS || 0 };
-  applySponsorOverrides(sponsorOverrides);
-  const derived = deriveWeeks(scores, season);
-  config.TOTAL_WEEKS = derived.TOTAL_WEEKS;
-  config.CURRENT_WEEK = (season?.current_week != null ? season.current_week : derived.CURRENT_WEEK);
-  config.currentSeasonLabel = season?.label || 'Spring 2026';
-  config.currentSeasonIsCurrent = season?.is_current ?? true;
-  config.currentSeasonSlug = season?.slug || val;
+  applySeasonData(dataRes.data, val);
+  // New season, new baseline — otherwise the first poll sees a wholesale
+  // "change" and repaints for no reason.
+  liveSignature = liveFingerprint(dataRes.data);
+  scoreSignature = scoresFingerprint(dataRes.data.scores);
+  const { season, awards } = dataRes.data;
   // Keep the desktop nav picker and the mobile drawer picker in step.
   document.querySelectorAll('.nav-season-select').forEach(sel => { sel.value = config.currentSeasonSlug; });
   const sa = awards?.find(a => a.champ);
@@ -183,18 +365,15 @@ async function loadAll() {
     return;
   }
 
-  const { season, teams, scores, awards, stats, gameStatValues, statDefinitions, sponsorOverrides, mediaItems, mediaSlots, contentBlocks, draftBank, draftTeamOrder, scheduleWeekLabels, playoffWeeks, totalRegGames } = dataRes.data;
-  config.DB = { teams, scores, awards, stats, gameStatValues: gameStatValues || {}, statDefinitions: statDefinitions || [], mediaItems: mediaItems || [], mediaSlots: mediaSlots || {}, contentBlocks: contentBlocks || {}, draftBank: draftBank || [], draftTeamOrder: draftTeamOrder || [], scheduleWeekLabels: scheduleWeekLabels || {}, playoffWeeks: playoffWeeks || {}, totalRegGames: totalRegGames || 0 };
-  applySponsorOverrides(sponsorOverrides);
-  const derived = deriveWeeks(scores, season);
-  config.TOTAL_WEEKS = derived.TOTAL_WEEKS;
-  config.CURRENT_WEEK = (season?.current_week != null ? season.current_week : derived.CURRENT_WEEK);
-  config.currentSeasonLabel = season?.label || 'Spring 2026';
-  config.currentSeasonIsCurrent = season?.is_current ?? true;
-  config.currentSeasonSlug = season?.slug || defaultSlug;
+  applySeasonData(dataRes.data, defaultSlug);
+  liveSignature = liveFingerprint(dataRes.data);
+  // Seeded here, not on the first probe: a score that moves in between would
+  // otherwise be swallowed as the baseline and never repaint.
+  scoreSignature = scoresFingerprint(dataRes.data.scores);
 
   populateSeasonDropdown(seasons, defaultSlug);
   renderAll();
+  startLiveRefresh();
 }
 
 window.showPage = showPage;
@@ -278,4 +457,7 @@ window.showPage = function(id, skipPush) {
 
 initNavDrawer();
 initBoxScoreFullscreen();
-loadAll();
+// The home trophy is watched only once the page has its content: until the
+// season loads, home is short enough that its last section sits inside the
+// look-ahead margin, and three.js would load on every visit.
+loadAll().finally(watchHomeTrophy);

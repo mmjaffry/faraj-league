@@ -8,6 +8,9 @@ import { calcStandings as calcStandingsPure, calcSeeds as calcSeedsPure } from '
 import { resolveTeamLogo, logoScaleCss } from '../lib/team-logos.js';
 import { filterBankPlayers } from '../lib/draft-bank.js';
 import { orderRosterForDisplay } from '../lib/roster.js';
+import { sponsorName } from '../lib/sponsors.js';
+import { gameStatus, isFinal, statusLine, GAME_STATUS } from '../lib/game-clock.js';
+import { seasonLogo } from '../lib/season-logo.js';
 
 let activeTeam = null;
 
@@ -97,6 +100,17 @@ export function renderAll(adminMode = false) {
   set('about-conf-title', `${config.currentSeasonLabel} Structure`);
   const heroBadge = document.getElementById('hero-badge');
   if (heroBadge) heroBadge.textContent = config.DB.contentBlocks?.hero_badge || `${config.currentSeasonLabel} · Inaugural Season`;
+  const heroLogo = document.getElementById('hero-league-logo');
+  if (heroLogo) {
+    const logo = seasonLogo(config.currentSeasonSlug);
+    // Compare resolved URLs: the HTML ships a page-relative src and toAssetPath
+    // a root-relative one for the same file, and renderAll runs on every live
+    // poll — only a real season change should touch the image.
+    const src = toAssetPath(logo.src);
+    if (heroLogo.src !== new URL(src, location.href).href) heroLogo.src = src;
+    heroLogo.className = `hero-league-logo hero-league-logo--${logo.variant}`;
+    heroLogo.alt = logo.alt;
+  }
   const seasonTag = document.getElementById('season-tag');
   if (seasonTag) {
     if (config.DB.contentBlocks?.season_tag != null) {
@@ -111,10 +125,15 @@ export function renderAll(adminMode = false) {
 
   const banner = document.getElementById('title-sponsor-banner');
   if (banner) {
-    const titleName = config.SP1 && config.SP1 !== '[SPONSOR 1 NAME AND LOGO]' ? config.SP1 : 'Zabiha Family Ranch';
-    const titleLogo = config.SP1_LOGO || 'images/zabiha-logo.png';
-    const logoSrc = toAssetPath(titleLogo);
-  banner.innerHTML = `<div class="title-sponsor-bar"><span class="title-sponsor-eyebrow">Presented by:</span><div class="title-sponsor-logo-wrap"><img src="${logoSrc.replace(/"/g, '&quot;')}" class="title-sponsor-logo" alt="${titleName.replace(/"/g, '&quot;')} logo"></div></div>`;
+    // No title sponsor for this season means no banner at all — never a
+    // fallback to another season's sponsor.
+    const titleName = sponsorName(config.SP1, '[SPONSOR 1 NAME AND LOGO]');
+    const logoSrc = config.SP1_LOGO ? toAssetPath(config.SP1_LOGO) : '';
+    banner.innerHTML = (titleName || logoSrc)
+      ? `<div class="title-sponsor-bar"><span class="title-sponsor-eyebrow">Presented by:</span><div class="title-sponsor-logo-wrap">${logoSrc
+          ? `<img src="${escapeHtmlAttr(logoSrc)}" class="title-sponsor-logo" alt="${escapeHtmlAttr(titleName)} logo">`
+          : `<span class="title-sponsor-name">${escapeHtmlAttr(titleName)}</span>`}</div></div>`
+      : '';
   }
 
   const blocks = config.DB.contentBlocks || {};
@@ -128,11 +147,13 @@ export function renderAll(adminMode = false) {
     const el = document.getElementById(id);
     if (el) el.textContent = text || fallback;
   };
-  setLogo('sponsor-title-logo', config.SP1_LOGO || 'images/zabiha-logo.png', config.SP1 && config.SP1 !== '[SPONSOR 1 NAME AND LOGO]' ? config.SP1 : 'Zabiha Family Ranch');
+  // An unset slot renders the neutral "Add logo" placeholder rather than any
+  // particular brand, so clearing a sponsor in admin actually clears it.
+  setLogo('sponsor-title-logo', config.SP1_LOGO, sponsorName(config.SP1, '[SPONSOR 1 NAME AND LOGO]'));
   setDesc('sponsor-title-desc', config.SP1_DESC, '');
-  setLogo('sponsor-mecca-logo', config.SP2A_LOGO || 'images/toyomotors-logo.png', config.SP2A && config.SP2A !== '[Sponsor 2A]' ? config.SP2A : 'TOYOMOTORS');
+  setLogo('sponsor-mecca-logo', config.SP2A_LOGO, sponsorName(config.SP2A, '[Sponsor 2A]'));
   setDesc('sponsor-mecca-desc', config.SP2A_DESC, '');
-  setLogo('sponsor-medina-logo', config.SP2B_LOGO || 'images/wellness-logo.png', config.SP2B && config.SP2B !== '[Sponsor 2B]' ? config.SP2B : 'Xtreme Wellness');
+  setLogo('sponsor-medina-logo', config.SP2B_LOGO, sponsorName(config.SP2B, '[Sponsor 2B]'));
   setDesc('sponsor-medina-desc', config.SP2B_DESC, '');
   const tierTitle = document.querySelector('.tier-title');
   const tierConf = document.querySelector('.tier-conf');
@@ -394,29 +415,39 @@ function buildMatchupCard(g, gameId) {
   const played = g.s1 !== '' && g.s2 !== '';
   const s1 = parseInt(g.s1 || 0), s2 = parseInt(g.s2 || 0);
 
-  // Forfeit overrides winner regardless of score
+  const status = gameStatus(g);
+  const live = status === GAME_STATUS.LIVE || status === GAME_STATUS.HALFTIME;
+  const decided = isFinal(g);
+
+  // Forfeit overrides winner regardless of score. A winner is only named once
+  // the game is final — while it is being played the leader is just leading.
   const forfeit = g.forfeit || null; // 't1' or 't2' or null
-  const w1 = forfeit ? forfeit === 't2' : (played && s1 > s2);
-  const w2 = forfeit ? forfeit === 't1' : (played && s2 > s1);
-  const isDecided = forfeit || played;
+  const w1 = decided && (forfeit ? forfeit === 't2' : (played && s1 > s2));
+  const w2 = decided && (forfeit ? forfeit === 't1' : (played && s2 > s1));
+  const isDecided = decided;
 
   // Header band: Game N (left) | time (center) | ghost spacer (right to balance)
-  const timeStr = isDecided ? '' : formatGameTime(g.scheduled_at, g.game || 1);
+  const timeStr = (isDecided || live) ? '' : formatGameTime(g.scheduled_at, g.game || 1);
   const header = `<div class="mc-header">
     <span class="mc-meta-game">Game ${g.game || 1}</span>
     <span class="mc-meta-time">${timeStr}</span>
     <span class="mc-meta-game" aria-hidden="true" style="visibility:hidden">Game ${g.game || 1}</span>
   </div>`;
 
-  const mid = played
-    ? `<div class="mc-mid"><div class="mc-score-row"><span class="mc-score${w2 ? ' winner' : ''}">${g.s2}</span><span class="mc-dash">—</span><span class="mc-score${w1 ? ' winner' : ''}">${g.s1}</span></div></div>`
+  const showScore = played || live;
+  const mid = showScore
+    ? `<div class="mc-mid"><div class="mc-score-row"><span class="mc-score${w2 ? ' winner' : ''}">${g.s2 || 0}</span><span class="mc-dash">—</span><span class="mc-score${w1 ? ' winner' : ''}">${g.s1 || 0}</span></div></div>`
     : isDecided
       ? `<div class="mc-mid"><div class="mc-vs-wrap"><span class="mc-vs">W</span></div></div>`
       : `<div class="mc-mid"><div class="mc-vs-wrap"><span class="mc-vs-deco">VS</span><span class="mc-vs">VS</span></div></div>`;
 
+  // While live, the winner tag's slot carries the period and clock instead.
+  // `data-live-clock` lets app.js tick it each second between polls.
   const winnerLine = isDecided
     ? `<div class="mc-winner-tag">${w1 ? escapeHtmlAttr(g.t1) : escapeHtmlAttr(g.t2)} Win</div>`
-    : '';
+    : live
+      ? `<div class="mc-live-tag${status === GAME_STATUS.HALFTIME ? ' mc-live-half' : ''}"><span class="mc-live-dot" aria-hidden="true"></span><span data-live-clock="${escapeHtmlAttr(g.gameId || '')}">${escapeHtmlAttr(statusLine(g))}</span></div>`
+      : '';
 
   const viewBoxBtn = gameId
     ? `<button type="button" class="schedule-expand-btn mc-box-btn" data-game-id="${gameId}">View box score</button>`
