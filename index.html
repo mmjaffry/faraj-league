@@ -4,6 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Faraj League</title>
+<!-- Link previews (iMessage, WhatsApp, social): the league's logo. Without these, apps show the
+     largest image on the page, which is the champions photo. Crawlers need absolute URLs. -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Faraj League">
+<meta property="og:title" content="Faraj League">
+<meta property="og:url" content="https://farajleague.org/">
+<meta property="og:image" content="https://farajleague.org/images/logos/fall2026-city-edition-share.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Faraj Basketball League — City Edition logo">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://farajleague.org/images/logos/fall2026-city-edition-share.png">
 <link rel="icon" type="image/png" href="faraj-logo.png">
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <!-- Google tag (gtag.js) -->
@@ -15,7 +28,7 @@
   gtag('config', 'G-Q03KC4GHZZ');
 </script>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Lato:wght@300;400;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/main.css?v=20260926b">
+<link rel="stylesheet" href="css/main.css?v=20260926c">
 <link rel="stylesheet" href="css/trophy.css?v=20260925c">
 </head>
 <body>
@@ -76,7 +89,7 @@
   <div class="hero">
     <div class="hero-bg"></div><div class="hero-geo"></div>
     <div class="hero-photo">
-      <img class="hero-photo-img" src="images/champions/spring2026-1200.jpg" srcset="images/champions/spring2026-800.jpg 800w, images/champions/spring2026-1200.jpg 1200w, images/champions/spring2026-1600.jpg 1600w, images/champions/spring2026-2345.jpg 2345w" sizes="(min-width: 1300px) 1300px, 100vw" width="2345" height="1623" fetchpriority="high" alt="The Spring 2026 champions with the Faraj League trophy">
+      <img class="hero-photo-img" id="hero-champions-photo" src="images/champions/spring2026-1200.jpg" srcset="images/champions/spring2026-800.jpg 800w, images/champions/spring2026-1200.jpg 1200w, images/champions/spring2026-1600.jpg 1600w, images/champions/spring2026-2345.jpg 2345w" sizes="(min-width: 1300px) 1300px, 100vw" width="2345" height="1623" fetchpriority="high" alt="The Spring 2026 champions with the Faraj League trophy">
       <div class="hero-top">
         <div class="hero-badge" id="hero-badge">Spring 2026 · Inaugural Season</div>
         <div class="hero-lockup">
