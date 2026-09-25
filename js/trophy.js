@@ -1,5 +1,5 @@
 /**
- * The champions trophy at the top of the awards page.
+ * The champions trophy: the top of the awards page and the end of the home page.
  *
  * Scrolling drives a camera move from a bird's-eye view of the ball down to
  * the trophy standing upright. Once upright it turns by dragging or with the
@@ -7,23 +7,21 @@
  * on a tap or click.
  *
  * Built with three.js, imported from esm.sh (where the site already gets
- * Supabase) only when the awards page is first opened, so no other page pays
- * for it. Without WebGL2, or when three.js cannot load, the cards are shown
+ * Supabase) only when a trophy is about to be seen, so a visit that never
+ * reaches one never pays for it. Without WebGL2, or when three.js cannot load, the cards are shown
  * as a plain list instead; with reduced motion the trophy starts upright.
  *
- * What goes on the trophy and where is lib/trophy.js; this file is the DOM
- * and the 3D.
+ * What goes on the trophy and where is lib/trophy.js; the HTML card and the
+ * loupe and full-screen view it opens in are js/champion-card.js, which the
+ * home hero's plaque shares without loading any of this; this file is the 3D.
  */
 import { slotForIndex, layoutCard, CARD_ASPECT, CARD_TRACKING, SLOT_COLUMNS, SLOT_ROWS } from '../lib/trophy.js';
 import { getBasePath } from './config.js';
+import { CARD_FONT, loadCardFont, measureCard, cardElement, overlays } from './champion-card.js';
 
 // One import, deliberately: three.js's add-ons import 'three' themselves, and
 // if a CDN ever resolved that differently the page would run two copies.
 const THREE_URL = 'https://esm.sh/three@0.186.1';
-const FONT_CSS = 'https://fonts.googleapis.com/css2?family=Jost:wght@500&display=swap';
-
-// The engraving on the real trophy is Futura; Jost is its closest free twin.
-export const CARD_FONT = '"Jost", "Futura", "Century Gothic", "Avenir Next", sans-serif';
 const INK = '#1a1309';
 const INK_ORM = 'rgb(0,150,255)';   // occluded, fairly rough, metal
 
@@ -32,6 +30,20 @@ const DIM = { lowerW: 6.85, lowerH: 4.2, upperW: 5.65, upperH: 3.7, stemH: 2.2, 
 const BASE_TOP = DIM.lowerH + DIM.upperH;
 const BALL_Y = BASE_TOP + DIM.stemH + DIM.ballR;
 const TOP_Y = BALL_Y + DIM.ballR;
+// The ball's seams, fitted to the photo of the real trophy as it is seen from
+// the front: two great circles crossing at nearly right angles, and a ring
+// either side of the middle one. A seam is where asin(n.p) = lat + bend.k (bend.m.p)^2
+// for p on the ball: a circle round the axis n at latitude `lat` (0 for a great
+// circle), squeezed a little along `bend.m` — which is all it takes for the
+// lower ring to run off the bottom right as the real one does. In the trophy's
+// own frame (+x right, +y up, +z out of the front), so the sides and back follow
+// from the same curves.
+const BALL_SEAMS = {
+  cross: { n: [0.6895, 0.1715, 0.7037] },                                     // down the left of the front
+  middle: { n: [-0.0144, -0.9822, 0.1872] },                                  // across the middle
+  upper: { n: [-0.2390, 0.9659, 0.1001], lat: 0.7439, bend: { m: [0.8959, 0.2590, -0.3609], k: -0.141 } },  // rising to the top right
+  lower: { n: [-0.3156, -0.8607, 0.3994], lat: 0.6487, bend: { m: [-0.9489, 0.2871, -0.1312], k: 0.130 } },  // falling to the bottom right
+};
 const SLOT = { w: 3.15, h: 1.07, gapX: 0.2, gapY: 0.2, plateW: 3.02, plateH: 3.02 / CARD_ASPECT, gridOffsetY: -0.1 };
 const PLAQUE = { frameW: 5.2, frameH: 3.08, w: 4.95, h: 2.8 };
 
@@ -56,49 +68,6 @@ function mulberry32(seed) {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-// ---- fonts and card layout --------------------------------------------------
-
-export async function loadCardFont() {
-  const timeout = (ms) => new Promise(r => setTimeout(r, ms));
-  // Textures are drawn once, so the real face has to be there first — but a
-  // slow font must never hang the trophy; the fallbacks are close enough.
-  try {
-    let link = document.querySelector(`link[href="${FONT_CSS}"]`);
-    if (!link) {
-      link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = FONT_CSS;
-      const loaded = new Promise(r => { link.onload = r; link.onerror = r; });
-      document.head.appendChild(link);
-      // Until the stylesheet has arrived there is no @font-face for Jost, and
-      // fonts.load() would resolve at once with nothing — the plates would be
-      // engraved in the fallback font while the HTML card, which re-renders
-      // when a font arrives, looked right.
-      await Promise.race([loaded, timeout(3000)]);
-    }
-    await Promise.race([document.fonts.load('500 64px "Jost"'), timeout(3000)]);
-  } catch (_) { /* fall back silently */ }
-}
-
-let measureCtx = null;
-/** Width of `text` at a font size of 1, in the card font. */
-function measureCard(text) {
-  if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
-  measureCtx.font = `500 100px ${CARD_FONT}`;
-  return measureCtx.measureText(text).width / 100;
-}
-
-/** The enlarged HTML card: same lines, same layout maths as the 3D plate. */
-function cardElement(card) {
-  const l = layoutCard(card.lines, measureCard);
-  const el = document.createElement('div');
-  el.className = 'trophy-card';
-  el.style.setProperty('--fs', l.fontSize.toFixed(4));
-  el.style.setProperty('--lh', l.lineHeight.toFixed(4));
-  el.innerHTML = card.lines.map(t => `<span>${esc(t)}</span>`).join('');
-  return el;
 }
 
 // ---- textures ----------------------------------------------------------------
@@ -278,14 +247,21 @@ function loadImage(src) {
  */
 function ballMaterial(THREE, pebbleTex) {
   const mat = new THREE.MeshStandardMaterial({ color: 0xe8b64c, metalness: 1, roughness: 0.42 });
-  const seamRot = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(0.55, 0.35, 0.25)));
+  // Per seam, xyz: the axis n, w: the latitude; and xyz: the squeeze direction m, w: its amount k.
+  const vec4 = (xyz, w) => { const v = new THREE.Vector3(...xyz).normalize(); return new THREE.Vector4(v.x, v.y, v.z, w); };
+  const seam = ({ n, lat = 0 }) => vec4(n, lat);
+  const bend = ({ bend: b }) => (b ? vec4(b.m, b.k) : new THREE.Vector4(1, 0, 0, 0));
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, {
       uPebble: { value: pebbleTex },
       uPebbleScale: { value: 0.8 },
-      uSeamRot: { value: seamRot },
+      uSeamCross: { value: seam(BALL_SEAMS.cross) },
+      uSeamMiddle: { value: seam(BALL_SEAMS.middle) },
+      uSeamUpper: { value: seam(BALL_SEAMS.upper) },
+      uSeamLower: { value: seam(BALL_SEAMS.lower) },
+      uBendUpper: { value: bend(BALL_SEAMS.upper) },
+      uBendLower: { value: bend(BALL_SEAMS.lower) },
       uSeamW: { value: 0.024 },
-      uSideSeam: { value: 0.62 },
       uBump: { value: 0.9 },
     });
     shader.vertexShader = shader.vertexShader
@@ -295,8 +271,13 @@ function ballMaterial(THREE, pebbleTex) {
       .replace('#include <common>', `#include <common>
         varying vec3 vBallPos;
         uniform sampler2D uPebble;
-        uniform float uPebbleScale, uSeamW, uSideSeam, uBump;
-        uniform mat3 uSeamRot;
+        uniform float uPebbleScale, uSeamW, uBump;
+        uniform vec4 uSeamCross, uSeamMiddle, uSeamUpper, uSeamLower, uBendUpper, uBendLower;
+        // Angle between a point on the ball and one seam (see BALL_SEAMS).
+        float seamDist(vec4 s, vec4 b, vec3 n) {
+          float m = dot(b.xyz, n);
+          return abs(asin(clamp(dot(s.xyz, n), -1.0, 1.0)) - s.w - b.w * m * m);
+        }
         vec3 ballPerturb(vec3 surfPos, vec3 surfNorm, vec2 dHdxy, float faceDir) {
           vec3 sx = normalize(dFdx(surfPos)), sy = normalize(dFdy(surfPos));
           vec3 r1 = cross(sy, surfNorm), r2 = cross(surfNorm, sx);
@@ -306,9 +287,8 @@ function ballMaterial(THREE, pebbleTex) {
         }`)
       .replace('#include <map_fragment>', `
         vec3 bn = normalize(vBallPos);
-        vec3 bs = uSeamRot * bn;
-        float latX = asin(clamp(bs.x, -1.0, 1.0));
-        float seamD = min(min(abs(latX), abs(asin(clamp(bs.y, -1.0, 1.0)))), abs(abs(latX) - uSideSeam));
+        float seamD = min(min(seamDist(uSeamCross, vec4(0.0), bn), seamDist(uSeamMiddle, vec4(0.0), bn)),
+                          min(seamDist(uSeamUpper, uBendUpper, bn), seamDist(uSeamLower, uBendLower, bn)));
         float seamT = clamp(seamD / uSeamW, 0.0, 1.0);
         float seamMask = 1.0 - smoothstep(0.55, 1.0, seamT);
         float pebbleW = smoothstep(1.0, 1.9, seamD / uSeamW);
@@ -475,74 +455,6 @@ function showFallback(section, cards) {
     ? `<div class="trophy-fallback">${cards.map(() => '<div class="trophy-fallback-slot"></div>').join('')}</div>`
     : '<p class="trophy-empty">The first champions are still to be crowned.</p>';
   view.querySelectorAll('.trophy-fallback-slot').forEach((slot, i) => slot.appendChild(cardElement(cards[i])));
-}
-
-// ---- loupe and full-screen card, shared by every trophy on the site ---------------
-
-let overlaySet = null;
-
-/**
- * The hover loupe and the full-screen card are single elements the whole site
- * shares: the home page and the awards page each have a trophy, only one of
- * which is ever on screen, and two of each (plus two Escape handlers) would
- * fight over the same keyboard and scroll lock.
- */
-function overlays() {
-  if (overlaySet) return overlaySet;
-
-  const loupe = document.createElement('div');
-  loupe.className = 'trophy-loupe';
-  loupe.setAttribute('aria-hidden', 'true');
-  document.body.appendChild(loupe);
-  let loupeCard = null;
-  function showLoupe(card, x, y) {
-    if (loupeCard !== card) {
-      loupeCard = card;
-      loupe.replaceChildren(cardElement(card));
-    }
-    loupe.classList.add('is-open');
-    const w = loupe.offsetWidth, h = loupe.offsetHeight, m = 12;
-    let lx = x + 24, ly = y - h - 24;
-    if (lx + w > window.innerWidth - m) lx = x - w - 24;
-    if (ly < m) ly = y + 24;
-    loupe.style.transform = `translate(${Math.max(m, lx)}px, ${Math.max(m, Math.min(ly, window.innerHeight - h - m))}px)`;
-  }
-  function hideLoupe() {
-    loupe.classList.remove('is-open');
-  }
-
-  const modal = document.createElement('div');
-  modal.className = 'trophy-modal';
-  modal.setAttribute('role', 'dialog');
-  modal.setAttribute('aria-modal', 'true');
-  modal.hidden = true;
-  modal.innerHTML = `<button type="button" class="trophy-modal-close" aria-label="Close">×</button>
-    <figure class="trophy-modal-body"><div class="trophy-modal-card"></div><figcaption class="trophy-modal-caption"></figcaption></figure>`;
-  document.body.appendChild(modal);
-  let lastFocus = null, hideTimer = 0;
-  function openModal(card) {
-    clearTimeout(hideTimer);   // reopened while the last close was still fading out
-    modal.querySelector('.trophy-modal-card').replaceChildren(cardElement(card));
-    modal.querySelector('.trophy-modal-caption').textContent = `${card.team} · ${card.season} Champions`;
-    modal.setAttribute('aria-label', `${card.team}, ${card.season} champions card`);
-    lastFocus = document.activeElement;
-    modal.hidden = false;
-    requestAnimationFrame(() => modal.classList.add('is-open'));
-    document.documentElement.classList.add('trophy-modal-open');
-    modal.querySelector('.trophy-modal-close').focus();
-  }
-  function closeModal() {
-    if (modal.hidden) return;
-    modal.classList.remove('is-open');
-    document.documentElement.classList.remove('trophy-modal-open');
-    hideTimer = setTimeout(() => { modal.hidden = true; }, 200);
-    lastFocus?.focus?.();
-  }
-  modal.addEventListener('click', (e) => { if (e.target === modal || e.target.closest('.trophy-modal-close')) closeModal(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
-
-  overlaySet = { showLoupe, hideLoupe, openModal };
-  return overlaySet;
 }
 
 // ---- mount ---------------------------------------------------------------------
