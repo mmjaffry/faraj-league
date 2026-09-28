@@ -21,8 +21,8 @@
 import {
   deriveState, appendEvent, undo, redo, canUndo, canRedo,
   toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, hasRecordedStats,
-  changedStatValues, statValueKey, bonusFor, bonusLabel, periodLabel, PERIOD_OPTIONS, MAX_PERIOD,
-  STAT_LABELS, LINEUP_SIZE, DEFAULT_PERIOD_SECONDS,
+  changedStatValues, statValueKey, bonusFor, bonusLabel, periodLabel, rewindClock, PERIOD_OPTIONS, MAX_PERIOD,
+  LINEUP_SIZE, DEFAULT_PERIOD_SECONDS,
 } from '../../lib/game-tracker.js';
 import { playBonusHorn } from './tracker-sound.js';
 
@@ -37,17 +37,12 @@ const AUTO_SYNC_MS = 900;
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-/** Tokens dragged onto players. Points first — they are the common case. */
+/** Tokens dragged onto players: points and fouls, the only stats the tracker keeps. */
 const TOKENS = [
   { key: 'p1', label: '+1', kind: 'score', points: 1, cls: 'lt-token-score' },
   { key: 'p2', label: '+2', kind: 'score', points: 2, cls: 'lt-token-score' },
   { key: 'p3', label: '+3', kind: 'score', points: 3, cls: 'lt-token-score' },
   { key: 'foul', label: 'Foul', kind: 'foul', cls: 'lt-token-foul' },
-  { key: 'reb', label: 'Reb', kind: 'stat', stat: 'reb', cls: 'lt-token-stat' },
-  { key: 'ast', label: 'Ast', kind: 'stat', stat: 'ast', cls: 'lt-token-stat' },
-  { key: 'stl', label: 'Stl', kind: 'stat', stat: 'stl', cls: 'lt-token-stat' },
-  { key: 'blk', label: 'Blk', kind: 'stat', stat: 'blk', cls: 'lt-token-stat' },
-  { key: 'to', label: 'TO', kind: 'stat', stat: 'to', cls: 'lt-token-stat' },
 ];
 
 /**
@@ -67,8 +62,14 @@ export function openLiveTracker(game, ctx) {
 
   const rosterOf = (t) => (t.roster || []).filter(p => p.id);
   const nameById = {};
-  [homeTeam, awayTeam].forEach(t => rosterOf(t).forEach(p => { nameById[p.id] = p.name; }));
+  const numberById = {};
+  [homeTeam, awayTeam].forEach(t => rosterOf(t).forEach(p => {
+    nameById[p.id] = p.name;
+    if (p.jersey_number != null && p.jersey_number !== '') numberById[p.id] = String(p.jersey_number);
+  }));
   const nameOf = (id) => nameById[id] || '—';
+  /** "#23 Name" where the player has a number — how a scorekeeper spots them on the floor. */
+  const labelOf = (id) => (numberById[id] != null ? `#${numberById[id]} ` : '') + nameOf(id);
   const cfg = { homeTeamId: homeTeam.id, awayTeamId: awayTeam.id };
 
   // ---- persisted session -------------------------------------------------
@@ -82,9 +83,13 @@ export function openLiveTracker(game, ctx) {
     /** Mirrors games.status so a reopened tracker knows where it left off. */
     status: null,
     // Cumulative seconds the clock has actually run, across periods. Minutes
-    // played are derived from this rather than from the countdown, so setting
-    // the clock by hand never rewrites anyone's minutes.
+    // played are derived from this rather than from the countdown: setting the
+    // clock forward never adds minutes, and setting it back within a period
+    // takes those seconds back (see the clock handler and `rewindClock`).
     elapsed: 0,
+    // The schedule shows the home team blue and the away team white; teams
+    // whose jerseys are the other way round get swapped here, per game.
+    colorsSwapped: false,
   };
   let session = blank;
   try {
@@ -105,7 +110,7 @@ export function openLiveTracker(game, ctx) {
     <div class="lt-panel" role="dialog" aria-label="Live stat tracker">
       <div class="lt-header">
         <div class="lt-scoreboard">
-          <div class="lt-team-score"><span class="lt-team-name">${esc(homeTeam.name)}</span><span class="lt-score" id="lt-home-score">0</span></div>
+          <div class="lt-team-score" data-team="${esc(homeTeam.id)}"><span class="lt-team-name">${esc(homeTeam.name)}</span><span class="lt-score" id="lt-home-score">0</span></div>
           <div class="lt-clock-wrap">
             <button type="button" class="lt-clock" id="lt-clock" title="Tap to set the clock">20:00</button>
             <div class="lt-clock-controls">
@@ -115,11 +120,13 @@ export function openLiveTracker(game, ctx) {
               </select>
             </div>
           </div>
-          <div class="lt-team-score"><span class="lt-team-name">${esc(awayTeam.name)}</span><span class="lt-score" id="lt-away-score">0</span></div>
+          <div class="lt-team-score" data-team="${esc(awayTeam.id)}"><span class="lt-team-name">${esc(awayTeam.name)}</span><span class="lt-score" id="lt-away-score">0</span></div>
         </div>
         <div class="lt-actions">
           <button type="button" id="lt-undo" class="lt-btn">↶ Undo</button>
           <button type="button" id="lt-redo" class="lt-btn">↷ Redo</button>
+          <button type="button" id="lt-swap-colors" class="lt-btn" title="Swap which team is white and which is blue">⇄ Swap colors</button>
+          <button type="button" id="lt-not-started" class="lt-btn" title="Put this game back to not started: no score, not live">Mark not started</button>
           <button type="button" id="lt-end" class="lt-btn">End game</button>
           <button type="button" id="lt-save" class="lt-btn lt-btn-save">Save stats</button>
           <button type="button" id="lt-close" class="lt-btn">Close</button>
@@ -168,6 +175,8 @@ export function openLiveTracker(game, ctx) {
 
   // ---- state helpers -----------------------------------------------------
   const state = () => deriveState(session.events, session.cursor, cfg);
+  /** 'blue' for the home team and 'white' for the away team, as the schedule shows them, unless swapped. */
+  const teamColor = (teamId) => ((teamId === homeTeam.id) !== !!session.colorsSwapped ? 'blue' : 'white');
 
   function lineupFor(teamId, derived) {
     const onCourt = derived.teams[teamId]?.onCourt || [];
@@ -176,6 +185,7 @@ export function openLiveTracker(game, ctx) {
   }
 
   function record(event) {
+    if (resetting) return;
     const next = appendEvent(session.events, session.cursor, {
       ...event, period: session.period, clock: session.clock,
       elapsed: session.elapsed, at: Date.now(),
@@ -196,11 +206,13 @@ export function openLiveTracker(game, ctx) {
   let syncTimer = null;
   let syncing = false;
   let syncPending = false;
+  /** True while the game is being marked not started: taps and pushes wait. */
+  let resetting = false;
   /** `player:def` → value last written, so each push carries only the diff. */
   let lastSent = new Map();
 
   function queueAutoSync() {
-    if (autoSync === false) return;
+    if (autoSync === false || resetting) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(runAutoSync, AUTO_SYNC_MS);
   }
@@ -252,8 +264,15 @@ export function openLiveTracker(game, ctx) {
    */
   /** Cleared once the database turns out not to have the clock columns yet. */
   let clockSupported = true;
+  /** The state push in flight, if any. Pushes run in order, and a reset waits for them. */
+  let statePush = Promise.resolve();
 
-  async function pushGameState(status) {
+  function pushGameState(status) {
+    statePush = statePush.then(() => writeGameState(status));
+    return statePush;
+  }
+
+  async function writeGameState(status) {
     if (!clockSupported) return;
     try {
       await adminFetch('admin-games', {
@@ -311,8 +330,10 @@ export function openLiveTracker(game, ctx) {
     const s = derived.players[p.id] || {};
     const fouls = s.foul || 0;
     const mins = formatClock(livePlayerSeconds(derived, p.id, session.elapsed));
+    const number = numberById[p.id];
     return `<button type="button" class="lt-player${onCourt ? ' lt-on-court' : ' lt-bench-chip'}${fouls >= 5 ? ' lt-fouled-out' : ''}"
       data-player="${esc(p.id)}" data-team="${esc(p.teamId)}" data-oncourt="${onCourt ? '1' : '0'}">
+      <span class="lt-player-num${number == null ? ' lt-player-num-none' : ''}">${number == null ? '–' : esc(number)}</span>
       <span class="lt-player-name">${esc(p.name)}</span>
       <span class="lt-player-stats"><span class="lt-fouls">${fouls}F</span><span class="lt-pts">${s.pts || 0} pts</span></span>
       <span class="lt-player-mins" data-mins-for="${esc(p.id)}">${mins}</span>
@@ -341,6 +362,12 @@ export function openLiveTracker(game, ctx) {
       periodSelect.insertAdjacentHTML('beforeend', `<option value="${derived.period}">${esc(periodLabel(derived.period))}</option>`);
     }
     periodSelect.value = String(session.period);
+    // Each team in its colour — the court, its players and its scoreboard block.
+    [homeTeam, awayTeam].forEach(team => {
+      const color = teamColor(team.id);
+      wrap.querySelectorAll(`.lt-court[data-team="${team.id}"], .lt-team-score[data-team="${team.id}"]`)
+        .forEach(el => { el.dataset.color = color; });
+    });
     $('lt-startstop').textContent = session.running ? 'Pause' : 'Start';
     $('lt-startstop').classList.toggle('lt-btn-go', !session.running);
     $('lt-startstop').classList.toggle('lt-btn-stop', session.running);
@@ -394,9 +421,10 @@ export function openLiveTracker(game, ctx) {
     $('lt-undo').disabled = !canUndo(session.cursor);
     $('lt-redo').disabled = !canRedo(session.events, session.cursor);
     const last = session.events[session.cursor - 1];
-    $('lt-undo').title = last ? `Undo: ${describeEvent(last, nameOf)}` : 'Nothing to undo';
+    $('lt-undo').title = last ? `Undo${describeEvent(last, nameOf) ? `: ${describeEvent(last, nameOf)}` : ''}` : 'Nothing to undo';
 
-    const shown = session.events.slice(0, session.cursor).slice(-40).reverse();
+    // An older game's rebounds, assists and the like have no description any more.
+    const shown = session.events.slice(0, session.cursor).filter(e => describeEvent(e, nameOf)).slice(-40).reverse();
     $('lt-log').innerHTML = shown.length
       ? shown.map(e => `<div class="lt-log-row"><span class="lt-log-clock">${esc(`${periodLabel(e.period)} ${formatClock(e.clock)}`)}</span>${esc(describeEvent(e, nameOf))}</div>`).join('')
       : '<div class="lt-empty">Nothing recorded yet.</div>';
@@ -427,7 +455,7 @@ export function openLiveTracker(game, ctx) {
       bar.textContent = `${t.label} — tap the player it belongs to. (Tap ${t.label} again to cancel.)`;
       wrap.querySelector(`.lt-token[data-token="${armed.token}"]`)?.classList.add('lt-armed-el');
     } else {
-      bar.textContent = `${nameOf(armed.playerId)} coming in — tap the player coming off.`;
+      bar.textContent = `${labelOf(armed.playerId)} coming in — tap the player coming off.`;
       wrap.querySelector(`.lt-player[data-player="${armed.playerId}"]`)?.classList.add('lt-armed-el');
     }
   }
@@ -437,7 +465,6 @@ export function openLiveTracker(game, ctx) {
     if (!t) return;
     if (t.kind === 'score') record({ type: 'score', playerId, teamId, points: t.points });
     else if (t.kind === 'foul') record({ type: 'foul', playerId, teamId });
-    else record({ type: 'stat', playerId, teamId, stat: t.stat });
   }
 
   /** A tap on a player: completes whatever is armed, or picks the starting five. */
@@ -512,7 +539,7 @@ export function openLiveTracker(game, ctx) {
       drag.ghost.className = 'lt-ghost';
       drag.ghost.textContent = drag.src.classList.contains('lt-token')
         ? drag.src.textContent.trim()
-        : nameOf(drag.src.dataset.player);
+        : labelOf(drag.src.dataset.player);
       document.body.appendChild(drag.ghost);
       e.preventDefault();
     }
@@ -594,11 +621,24 @@ export function openLiveTracker(game, ctx) {
   };
   $('lt-clock').onclick = () => {
     stopClock();
-    const entry = prompt('Set the clock (minutes, or mm:ss):', formatClock(session.clock));
+    const entry = prompt('Set the clock (minutes, or mm:ss).\nSetting it back also takes that time off the minutes of whoever was on the floor.', formatClock(session.clock));
     if (entry == null) { render(); return; }
     const m = String(entry).trim().match(/^(\d+)(?::(\d{1,2}))?$/);
     if (!m) { flash('Enter minutes like 20, or mm:ss like 12:30.'); render(); return; }
     const secs = Number(m[1]) * 60 + Number(m[2] || 0);
+    // Time put back on the clock within a period is time it should never have
+    // run — nearly always a clock left running through a stoppage — so whoever
+    // was on the floor for it gives those seconds back. Setting it forward
+    // leaves minutes alone.
+    if (secs > session.clock) {
+      const { events, elapsed, rewound } = rewindClock(session.events, {
+        elapsed: session.elapsed, seconds: secs - session.clock,
+        periodStart: state().periodStartElapsed, clock: secs, period: session.period,
+      });
+      session.events = events;
+      session.elapsed = elapsed;
+      if (rewound) flash(`Clock set back ${formatClock(rewound)} — taken off the minutes of whoever was on the floor.`);
+    }
     session.clock = secs;
     // A fresh setting also becomes the period length, so minutes played stay right.
     if (secs > session.periodSeconds) session.periodSeconds = secs;
@@ -623,6 +663,62 @@ export function openLiveTracker(game, ctx) {
   // ---- undo / redo / save ------------------------------------------------
   $('lt-undo').onclick = () => { session.cursor = undo(session.cursor); persist(); render(); queueAutoSync(); };
   $('lt-redo').onclick = () => { session.cursor = redo(session.events, session.cursor); persist(); render(); queueAutoSync(); };
+  $('lt-swap-colors').onclick = () => { session.colorsSwapped = !session.colorsSwapped; persist(); render(); };
+
+  // ---- mark not started --------------------------------------------------
+  /**
+   * Put the game back to not started — no score, no stats, not live — on the
+   * site and in this tracker. A queued push is cancelled and one in flight is
+   * waited for first, or a basket tapped a moment earlier (or the "live" it
+   * set off) would land after the reset and undo it.
+   */
+  async function markNotStarted() {
+    resetting = true;
+    stopClock();
+    try {
+      clearTimeout(syncTimer);
+      syncPending = false;
+      while (syncing) await new Promise(r => setTimeout(r, 100));
+      await statePush;
+      const rosterIds = [...rosterOf(homeTeam), ...rosterOf(awayTeam)].map(p => p.id);
+      const { clearGame } = await import('./game-reset.js');
+      await clearGame({ adminFetch, gameId: game.gameId, rosterPlayerIds: rosterIds });
+      lastSent = new Map();
+      game.s1 = ''; game.s2 = '';
+      // The database is genuinely fresh now (score nulled, status back to
+      // scheduled) — reset the local session to match, or the picker and
+      // clock stay wherever they were left (e.g. still showing "OT1"),
+      // which reads as if the reset hadn't really worked. The period
+      // length and the team colours are deliberate choices, so they — and
+      // only they — survive it.
+      session = { ...blank, periodSeconds: session.periodSeconds, clock: session.periodSeconds, colorsSwapped: session.colorsSwapped };
+      persist();
+      render();
+      const sync = $('lt-sync');
+      sync.className = 'lt-sync';
+      sync.textContent = 'Not started';
+    } finally {
+      resetting = false;
+    }
+    if (ctx.onSaved) await ctx.onSaved();
+  }
+
+  $('lt-not-started').onclick = async () => {
+    const scored = hasRecordedStats(state().players) || [game.s1, game.s2].some(v => v !== '' && v != null);
+    if (!confirm(scored
+      ? 'Mark this game as not started?\n\nIts score and every stat recorded for it are cleared, here and on the site. Viewers will see it as scheduled again.'
+      : 'Mark this game as not started?\n\nViewers will see it as scheduled again, not live.')) return;
+    $('lt-not-started').disabled = true;
+    flash('Marking not started…');
+    try {
+      await markNotStarted();
+      flash('Marked not started — viewers see it as scheduled again.');
+    } catch (err) {
+      flash(`Could not mark it not started: ${err.message}`);
+    } finally {
+      $('lt-not-started').disabled = false;
+    }
+  };
 
   $('lt-end').onclick = async () => {
     if (!confirm('End this game?\n\nViewers will see the final score and the winner instead of a running clock.')) return;
@@ -657,26 +753,14 @@ export function openLiveTracker(game, ctx) {
     // empty stats alone would leave the score at 0–0, which still reads as
     // played everywhere, so clear the score too.
     if (!hasRecordedStats(derived.players)) {
-      if (!confirm('Nothing is recorded for this game.\n\nClear its stats and mark it as NOT played?')) return;
+      if (!confirm('Nothing is recorded for this game.\n\nMark it as not started? Its score and stats are cleared, here and on the site.')) return;
       $('lt-save').disabled = true;
-      flash('Clearing…');
+      flash('Marking not started…');
       try {
-        const { clearGame } = await import('./game-reset.js');
-        await clearGame({ adminFetch, gameId: game.gameId, rosterPlayerIds: rosterIds });
-        lastSent = new Map();
-        // The database is genuinely fresh now (score nulled, status back to
-        // scheduled) — reset the local session to match, or the picker and
-        // clock stay wherever they were left (e.g. still showing "OT1"),
-        // which reads as if the clear hadn't really worked. The period
-        // length a scorekeeper had set is a deliberate choice, so it — and
-        // only it — survives the reset.
-        session = { ...blank, periodSeconds: session.periodSeconds, clock: session.periodSeconds };
-        persist();
-        render();
-        flash('Cleared. This game is back to not played.');
-        if (ctx.onSaved) await ctx.onSaved();
+        await markNotStarted();
+        flash('Marked not started — viewers see it as scheduled again.');
       } catch (err) {
-        flash(`Clear failed: ${err.message}`);
+        flash(`Could not mark it not started: ${err.message}`);
       } finally {
         $('lt-save').disabled = false;
       }

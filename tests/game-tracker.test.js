@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest';
 import {
   deriveState, appendEvent, undo, redo, canUndo, canRedo,
   toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, hasRecordedStats,
-  changedStatValues, bonusLevel, bonusLabel, bonusFor, periodLabel,
+  changedStatValues, bonusLevel, bonusLabel, bonusFor, periodLabel, rewindClock,
   LINEUP_SIZE, DEFAULT_PERIOD_SECONDS, BONUS_FOULS, DOUBLE_BONUS_FOULS, PERIOD_OPTIONS, MAX_PERIOD,
 } from '../lib/game-tracker.js';
 
@@ -121,14 +121,11 @@ describe('deriveState — fouls and counting stats', () => {
     expect(s.teams.H.fouls).toBe(2);
   });
 
-  it('records rebounds, assists, steals, blocks and turnovers', () => {
-    const s = all(['reb', 'ast', 'stl', 'blk', 'to'].map(stat => ({ type: 'stat', playerId: 'p1', stat })));
-    expect(s.players.p1).toMatchObject({ reb: 1, ast: 1, stl: 1, blk: 1, to: 1 });
-  });
-
-  it('rejects an unknown stat key', () => {
-    const s = all([{ type: 'stat', playerId: 'p1', stat: 'dunks' }]);
-    expect(s.warnings[0]).toMatch(/unknown stat/);
+  it('ignores the rebounds, assists and the rest an older log recorded', () => {
+    // Only points and fouls are kept now; a game tracked before that still opens.
+    const s = all([score('p1', 2), ...['reb', 'ast', 'stl', 'blk', 'to'].map(stat => ({ type: 'stat', playerId: 'p1', stat }))]);
+    expect(s.players.p1).toEqual({ pts: 2, fg1: 0, fg2: 1, fg3: 0, foul: 0, secondsPlayed: 0 });
+    expect(s.warnings).toEqual([]);
   });
 });
 
@@ -229,18 +226,17 @@ describe('toStatValues', () => {
     { id: 'd-reb', slug: 'rebounds' },
   ];
 
-  it('maps totals onto the defined stat columns', () => {
+  it('maps points and fouls onto their stat columns, and nothing else', () => {
     const s = all([score('p1', 2), { type: 'foul', playerId: 'p1', teamId: 'H' }, { type: 'stat', playerId: 'p1', stat: 'reb' }]);
-    const rows = toStatValues(s.players, defs);
-    expect(rows).toContainEqual({ player_id: 'p1', stat_definition_id: 'd-pts', value: 2 });
-    expect(rows).toContainEqual({ player_id: 'p1', stat_definition_id: 'd-foul', value: 1 });
-    expect(rows).toContainEqual({ player_id: 'p1', stat_definition_id: 'd-reb', value: 1 });
+    expect(toStatValues(s.players, defs)).toEqual([
+      { player_id: 'p1', stat_definition_id: 'd-pts', value: 2 },
+      { player_id: 'p1', stat_definition_id: 'd-foul', value: 1 },
+    ]);
   });
 
   it('skips stats the league has not defined', () => {
-    const rows = toStatValues(all([{ type: 'stat', playerId: 'p1', stat: 'stl' }]).players, defs);
-    expect(rows.every(r => r.stat_definition_id !== undefined)).toBe(true);
-    expect(rows).toHaveLength(3);
+    const rows = toStatValues(all([{ type: 'foul', playerId: 'p1', teamId: 'H' }]).players, [{ id: 'd-pts', slug: 'points' }]);
+    expect(rows).toEqual([{ player_id: 'p1', stat_definition_id: 'd-pts', value: 0 }]);
   });
 
   it('returns nothing when no stats are defined', () => {
@@ -255,13 +251,11 @@ describe('toStatValues', () => {
 
 describe('missingStatSlugs', () => {
   it('names the columns that still need creating', () => {
-    expect(missingStatSlugs([{ slug: 'points' }])).toEqual(
-      ['fouls', 'rebounds', 'assists', 'steals', 'blocks', 'turnovers']);
+    expect(missingStatSlugs([{ slug: 'points' }])).toEqual(['fouls']);
   });
 
-  it('is empty once everything exists', () => {
-    const defs = ['points', 'fouls', 'rebounds', 'assists', 'steals', 'blocks', 'turnovers'].map(slug => ({ slug }));
-    expect(missingStatSlugs(defs)).toEqual([]);
+  it('is empty once points and fouls exist', () => {
+    expect(missingStatSlugs(['points', 'fouls'].map(slug => ({ slug })))).toEqual([]);
   });
 });
 
@@ -271,7 +265,8 @@ describe('describeEvent', () => {
   it('describes each event type for the play log', () => {
     expect(describeEvent(score('p1', 3), nameOf)).toBe('Raza +3');
     expect(describeEvent({ type: 'foul', playerId: 'p1' }, nameOf)).toBe('Foul — Raza');
-    expect(describeEvent({ type: 'stat', playerId: 'p2', stat: 'reb' }, nameOf)).toBe('Rebound — Ali');
+    // An older log's rebound is no longer kept, so the play log leaves it out.
+    expect(describeEvent({ type: 'stat', playerId: 'p2', stat: 'reb' }, nameOf)).toBe('');
     expect(describeEvent({ type: 'sub', playerInId: 'p2', playerOutId: 'p1' }, nameOf)).toBe('Sub: Ali in for Raza');
     expect(describeEvent({ type: 'period', period: 3 })).toBe('Now OT1');
   });
@@ -416,6 +411,81 @@ describe('minutes played', () => {
   });
 });
 
+describe('setting the clock back takes the minutes back', () => {
+  const five = ['a', 'b', 'c', 'd', 'e'];
+  const start = { ...lineup('H', five), elapsed: 0, period: 1, clock: 1200 };
+  const sub = (playerInId, playerOutId, elapsed, clock) => ({ type: 'sub', teamId: 'H', playerInId, playerOutId, elapsed, period: 1, clock });
+  // What the tracker does: rewind, then read minutes at the new elapsed count.
+  const rewind = (events, elapsed, seconds, clock, period = 1) => {
+    const periodStart = all(events).periodStartElapsed;
+    return rewindClock(events, { elapsed, seconds, periodStart, clock, period });
+  };
+
+  it('takes the seconds put back off everyone on the floor', () => {
+    // The clock ran 3:00 through a stoppage (20:00 to 10:00 when it should read 13:00).
+    const r = rewind([start], 600, 180, 780);
+    expect(r).toMatchObject({ elapsed: 420, rewound: 180 });
+    expect(livePlayerSeconds(all(r.events), 'a', r.elapsed)).toBe(420);
+  });
+
+  it('gives a player subbed on during the stretch none of it, and stops one subbed off at the new time', () => {
+    // Clock left running from elapsed 420; the sub came at 500; set back to 420 at 600.
+    const r = rewind([start, sub('z', 'c', 500, 700)], 600, 180, 780);
+    const s = all(r.events);
+    expect(livePlayerSeconds(s, 'c', r.elapsed)).toBe(420);
+    expect(livePlayerSeconds(s, 'z', r.elapsed)).toBe(0);
+    // And once the clock runs again, the substitute's time counts from there.
+    expect(livePlayerSeconds(s, 'z', r.elapsed + 60)).toBe(60);
+    expect(livePlayerSeconds(s, 'c', r.elapsed + 60)).toBe(420);
+  });
+
+  it('leaves time before the stretch alone', () => {
+    const r = rewind([start, sub('z', 'c', 100, 1100)], 600, 180, 780);
+    expect(livePlayerSeconds(all(r.events), 'c', r.elapsed)).toBe(100);
+    expect(livePlayerSeconds(all(r.events), 'z', r.elapsed)).toBe(320);
+  });
+
+  it('moves what was recorded in the stretch to the corrected clock, without dropping it', () => {
+    const basket = { ...score('a', 2), elapsed: 550, period: 1, clock: 650 };
+    const r = rewind([start, basket], 600, 180, 780);
+    expect(r.events[1]).toMatchObject({ type: 'score', playerId: 'a', points: 2, elapsed: 420, clock: 780 });
+    expect(all(r.events).players.a.pts).toBe(2);
+    expect(r.events[0]).toBe(start);
+  });
+
+  it('never reaches back into the previous period', () => {
+    // H2 began at elapsed 1200; 60 seconds into it the clock is set back 5 minutes.
+    const h2 = { type: 'period', period: 2, elapsed: 1200, clock: 1200 };
+    const r = rewind([start, h2], 1260, 300, 1200 + 240, 2);
+    expect(r).toMatchObject({ elapsed: 1200, rewound: 60 });
+    expect(livePlayerSeconds(all(r.events), 'a', r.elapsed)).toBe(1200);
+  });
+
+  it('does nothing when the clock is set forward, or before it has run', () => {
+    expect(rewind([start], 600, 0, 600)).toMatchObject({ elapsed: 600, rewound: 0 });
+    expect(rewind([start], 600, -120, 480)).toMatchObject({ elapsed: 600, rewound: 0 });
+    expect(rewind([start], 0, 120, 1320)).toMatchObject({ elapsed: 0, rewound: 0 });
+  });
+
+  it('adds up when the clock is set back twice', () => {
+    const first = rewind([start, sub('z', 'c', 500, 700)], 600, 180, 780);
+    // The clock runs another minute, then is set back 30 seconds more.
+    const second = rewind(first.events, first.elapsed + 60, 30, 750);
+    const s = all(second.events);
+    expect(second.elapsed).toBe(450);
+    expect(livePlayerSeconds(s, 'a', second.elapsed)).toBe(450);
+    expect(livePlayerSeconds(s, 'c', second.elapsed)).toBe(420);
+    expect(livePlayerSeconds(s, 'z', second.elapsed)).toBe(30);
+  });
+
+  it('leaves the log it was given untouched', () => {
+    const events = [start, sub('z', 'c', 500, 700)];
+    const copy = JSON.parse(JSON.stringify(events));
+    rewind(events, 600, 180, 780);
+    expect(events).toEqual(copy);
+  });
+});
+
 describe('hasRecordedStats', () => {
   const five = ['a', 'b', 'c', 'd', 'e'];
 
@@ -439,7 +509,8 @@ describe('hasRecordedStats', () => {
   it('is true once anything is scored or recorded', () => {
     expect(hasRecordedStats(all([score('p1', 2)]).players)).toBe(true);
     expect(hasRecordedStats(all([{ type: 'foul', playerId: 'p1', teamId: 'H' }]).players)).toBe(true);
-    expect(hasRecordedStats(all([{ type: 'stat', playerId: 'p1', stat: 'reb' }]).players)).toBe(true);
+    // A rebound from an older log is not kept, so it alone does not make a game played.
+    expect(hasRecordedStats(all([{ type: 'stat', playerId: 'p1', stat: 'reb' }]).players)).toBe(false);
   });
 
   it('goes back to false when the only basket is undone', () => {
