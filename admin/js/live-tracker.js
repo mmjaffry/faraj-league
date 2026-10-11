@@ -25,15 +25,16 @@
 
 import {
   deriveState, appendEvent, undo, redo, canUndo, canRedo,
-  toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, hasRecordedStats,
+  toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, courtSeconds, hasRecordedStats,
   changedStatValues, statValueKey, bonusFor, bonusLabel, periodLabel, rewindClock, PERIOD_OPTIONS, MAX_PERIOD,
   LINEUP_SIZE, DEFAULT_PERIOD_SECONDS,
 } from '../../lib/game-tracker.js';
 import { hasJersey, jerseyValue, typedJersey, numberDuplicates } from '../../lib/jersey.js';
 import { saveJerseyNumber, setLoadedJersey } from './jersey.js';
 import { playBonusHorn } from './tracker-sound.js';
+import { trackerStorageKey, effectiveEvents, saveGameLog } from './game-log-store.js';
 
-const storageKey = (gameId) => `faraj_live_tracker_${gameId}`;
+const storageKey = trackerStorageKey;
 
 /**
  * Wait after the last tap before pushing. Short enough to feel immediate,
@@ -244,6 +245,8 @@ export function openLiveTracker(game, ctx) {
   let resetting = false;
   /** `player:def` → value last written, so each push carries only the diff. */
   let lastSent = new Map();
+  /** The push on its way, for End game to wait out before sending minutes. */
+  let syncInFlight = null;
 
   function queueAutoSync() {
     if (autoSync === false || resetting) return;
@@ -251,7 +254,12 @@ export function openLiveTracker(game, ctx) {
     syncTimer = setTimeout(runAutoSync, AUTO_SYNC_MS);
   }
 
-  async function runAutoSync() {
+  /**
+   * @param {{ withMinutes?: boolean }} [opts] minutes ride only on End game:
+   *   they grow every second the clock runs, so carrying them on every tap
+   *   would slow the push viewers are waiting on (see `toStatValues`).
+   */
+  async function runAutoSync({ withMinutes = false } = {}) {
     if (autoSync === false) return;
     if (syncing) { syncPending = true; return; }       // fold into the next run
     const defs = config.DB.statDefinitions || [];
@@ -264,7 +272,8 @@ export function openLiveTracker(game, ctx) {
     const rosterIds = [...rosterOf(homeTeam), ...rosterOf(awayTeam)].map(p => p.id);
     // Zero-fill every roster player: without it an undone basket leaves the
     // old total sitting in the database.
-    const values = toStatValues(derived.players, defs, rosterIds);
+    const seconds = withMinutes ? courtSeconds(derived, rosterIds, session.elapsed) : undefined;
+    const values = toStatValues(derived.players, defs, rosterIds, seconds);
     const changed = changedStatValues(values, lastSent);
     if (!changed.length) { setSyncState('saved'); return; }
 
@@ -272,10 +281,11 @@ export function openLiveTracker(game, ctx) {
     setSyncState('saving');
     try {
       // No DNP list mid-game — players simply may not have come on yet.
-      await adminFetch('admin-game-stats', {
+      syncInFlight = adminFetch('admin-game-stats', {
         method: 'POST',
         body: JSON.stringify({ game_id: game.gameId, values: changed, dnp_player_ids: [] }),
       });
+      await syncInFlight;
       // Only now: a failed write must be retried, not treated as sent.
       changed.forEach(v => lastSent.set(statValueKey(v), v.value));
       setSyncState('saved');
@@ -337,6 +347,43 @@ export function openLiveTracker(game, ctx) {
       // Anything else: scoring continues, the next change retries.
       setSyncState('error', err.message);
     }
+  }
+
+  /**
+   * Save the play-by-play (`game_logs`, migration 013) so a final game's box
+   * score can show it. Sent whole at the natural breaks — period changes, the
+   * half-time buzzer, End game, Save and closing — never per tap: it is only
+   * shown once the game is over, and the device keeps the log meanwhile.
+   * Never blocks scoring; a failure is named once, then retried at the next break.
+   * Sends run one after another, each taking the log as it is when its turn
+   * comes, so an earlier send can never land after a later one and overwrite it.
+   *
+   * @returns {Promise<{ ok: boolean, error?: string }>}
+   */
+  let logWarned = false;
+  let logPush = Promise.resolve();
+  function pushGameLog() {
+    const run = logPush.then(sendGameLog);
+    logPush = run;
+    return run;
+  }
+  async function sendGameLog() {
+    const events = effectiveEvents(session);
+    if (!events.length) return { ok: true };
+    try {
+      await saveGameLog({ adminFetch, gameId: game.gameId, events, names: nameById });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+  /** For the breaks that do not say anything themselves: report a failure once. */
+  function pushGameLogQuietly() {
+    pushGameLog().then((r) => {
+      if (r.ok || logWarned) return;
+      logWarned = true;
+      flash(`Game log not saved yet: ${r.error}`);
+    });
   }
 
   function setSyncState(kind, detail) {
@@ -874,6 +921,7 @@ export function openLiveTracker(game, ctx) {
         // scorekeeper to call the game.
         const atBreak = session.period < 2;
         pushGameState(atBreak ? 'halftime' : 'live');
+        pushGameLogQuietly();
         flash(atBreak ? 'Half time.' : 'Period over.');
       }
     }, 1000);
@@ -923,6 +971,7 @@ export function openLiveTracker(game, ctx) {
     session.clock = session.periodSeconds;
     record({ type: 'period', period: next });
     pushGameState('live');
+    pushGameLogQuietly();
   };
 
   // ---- undo / redo / save ------------------------------------------------
@@ -989,14 +1038,22 @@ export function openLiveTracker(game, ctx) {
     if (!confirm('End this game?\n\nViewers will see the final score and the winner instead of a running clock.')) return;
     stopClock();
     render();
-    await runAutoSync();          // make sure the last baskets are in
+    // A push still on its way would fold this one into the next run, which
+    // carries no minutes, so let it land first. Its own clean-up resumes
+    // before this does, so `syncing` is clear by the time we go on.
+    if (syncing) await syncInFlight?.catch(() => {});
+    await runAutoSync({ withMinutes: true });   // the last baskets, and everyone's minutes
     await pushGameState('final');
-    flash('Game ended — viewers now see the final score.');
+    const log = await pushGameLog();
+    flash(`Game ended — viewers now see the final score${log.ok ? ' and the game log' : ''}.`
+      + (log.ok ? '' : ` Game log not saved: ${log.error}`));
   };
 
   $('lt-close').onclick = () => {
     stopClock();
     persist();
+    // The last chance this session has to send the log; nobody is left to tell.
+    pushGameLog();
     document.removeEventListener('keydown', onKeydown);
     wrap.remove();
   };
@@ -1007,7 +1064,7 @@ export function openLiveTracker(game, ctx) {
     const defs = config.DB.statDefinitions || [];
     const missing = missingStatSlugs(defs);
     const rosterIds = [...rosterOf(homeTeam), ...rosterOf(awayTeam)].map(p => p.id);
-    const values = toStatValues(derived.players, defs, rosterIds);
+    const values = toStatValues(derived.players, defs, rosterIds, courtSeconds(derived, rosterIds, session.elapsed));
 
     if (!defs.length) {
       flash('No stat columns are defined yet — add at least "points" on the Stats tab.');
@@ -1050,7 +1107,9 @@ export function openLiveTracker(game, ctx) {
         method: 'POST',
         body: JSON.stringify({ game_id: game.gameId, values, dnp_player_ids: dnp }),
       });
-      flash(`Saved. ${missing.length ? `Not recorded (no stat column yet): ${missing.join(', ')}.` : ''}`);
+      const log = await pushGameLog();
+      flash(`Saved. ${missing.length ? `Not recorded (no stat column yet): ${missing.join(', ')}. ` : ''}`
+        + (log.ok ? '' : `Game log not saved: ${log.error}`));
       if (ctx.onSaved) await ctx.onSaved();
     } catch (err) {
       flash(`Save failed: ${err.message}`);

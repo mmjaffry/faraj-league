@@ -4,7 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deriveState, appendEvent, undo, redo, canUndo, canRedo,
-  toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, hasRecordedStats,
+  toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, courtSeconds, hasRecordedStats,
   changedStatValues, bonusLevel, bonusLabel, bonusFor, periodLabel, rewindClock,
   LINEUP_SIZE, DEFAULT_PERIOD_SECONDS, BONUS_FOULS, DOUBLE_BONUS_FOULS, PERIOD_OPTIONS, MAX_PERIOD,
 } from '../lib/game-tracker.js';
@@ -295,15 +295,100 @@ describe('toStatValues', () => {
     const rows = toStatValues(all([score('p1', 2)]).players, defs);
     expect(rows).toContainEqual({ player_id: 'p1', stat_definition_id: 'd-foul', value: 0 });
   });
+
+  describe('3s, 2s and 1s made', () => {
+    const made = [
+      { id: 'd-pts', slug: 'points' },
+      { id: 'd-3', slug: '3s_made' }, { id: 'd-2', slug: '2s_made' }, { id: 'd-1', slug: '1s_made' },
+    ];
+    const valuesOf = (rows, playerId) => Object.fromEntries(
+      rows.filter(r => r.player_id === playerId).map(r => [r.stat_definition_id, r.value]));
+
+    it('counts each basket by the button tapped: +3, +2 or +1', () => {
+      const s = all([score('p1', 3), score('p1', 2), score('p1', 2), score('p1', 1), score('p2', 3)]);
+      expect(valuesOf(toStatValues(s.players, made), 'p1')).toEqual({ 'd-pts': 8, 'd-3': 1, 'd-2': 2, 'd-1': 1 });
+      expect(valuesOf(toStatValues(s.players, made), 'p2')).toEqual({ 'd-pts': 3, 'd-3': 1, 'd-2': 0, 'd-1': 0 });
+    });
+
+    it('takes an undone basket off its count, as it does the points', () => {
+      const events = [score('p1', 3), score('p1', 2)];
+      const rows = toStatValues(deriveState(events, 1, CFG).players, made, ['p1']);
+      expect(valuesOf(rows, 'p1')).toEqual({ 'd-pts': 3, 'd-3': 1, 'd-2': 0, 'd-1': 0 });
+    });
+
+    it('zero-fills players who never scored', () => {
+      const rows = toStatValues(all([score('p1', 2)]).players, made, ['p1', 'p9']);
+      expect(valuesOf(rows, 'p9')).toEqual({ 'd-pts': 0, 'd-3': 0, 'd-2': 0, 'd-1': 0 });
+    });
+
+    it('sends points before the made counts', () => {
+      const ids = toStatValues(all([score('p1', 3)]).players, made).map(r => r.stat_definition_id);
+      expect(ids).toEqual(['d-pts', 'd-3', 'd-2', 'd-1']);
+    });
+
+    it('uses the slugs the admin Stats tab makes of "3s Made", "2s Made" and "1s Made"', () => {
+      const slugOf = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      expect(['3s Made', '2s Made', '1s Made'].map(slugOf)).toEqual(['3s_made', '2s_made', '1s_made']);
+    });
+  });
+
+  describe('minutes', () => {
+    const withMin = [...defs, { id: 'd-min', slug: 'minutes' }];
+    const minRows = rows => rows.filter(r => r.stat_definition_id === 'd-min');
+
+    it('leaves minutes out when no court time is given, as the live push does', () => {
+      expect(minRows(toStatValues(all([score('p1', 2)]).players, withMin, ['p1', 'p2']))).toEqual([]);
+    });
+
+    it('writes whole minutes, rounded, the way a box score shows them', () => {
+      const rows = toStatValues(all([score('p1', 2)]).players, withMin, ['p1'], { p1: 23 * 60 + 31 });
+      expect(minRows(rows)).toEqual([{ player_id: 'p1', stat_definition_id: 'd-min', value: 24 }]);
+    });
+
+    it('covers players with no stats, and gives zero to anyone it has no time for', () => {
+      const rows = toStatValues(all([score('p1', 2)]).players, withMin, ['p1', 'p2', 'p3'], { p1: 600, p2: 89 });
+      expect(minRows(rows)).toEqual([
+        { player_id: 'p1', stat_definition_id: 'd-min', value: 10 },
+        { player_id: 'p2', stat_definition_id: 'd-min', value: 1 },
+        { player_id: 'p3', stat_definition_id: 'd-min', value: 0 },
+      ]);
+    });
+
+    it('is skipped when the league has no minutes column, court time or not', () => {
+      expect(minRows(toStatValues(all([score('p1', 2)]).players, defs, ['p1'], { p1: 600 }))).toEqual([]);
+    });
+
+    it('takes court time from the live state, open stints included', () => {
+      const s = all([{ ...lineup('H', ['a', 'b', 'c', 'd', 'e']), elapsed: 0 }, { ...score('a', 2), elapsed: 30 },
+        { type: 'sub', teamId: 'H', playerInId: 'z', playerOutId: 'c', elapsed: 300 }]);
+      const ids = ['a', 'c', 'z', 'bench'];
+      const rows = toStatValues(s.players, withMin, ids, courtSeconds(s, ids, 1200));
+      expect(minRows(rows).map(r => [r.player_id, r.value])).toEqual([
+        ['a', 20], ['c', 5], ['z', 15], ['bench', 0],
+      ]);
+    });
+  });
+});
+
+describe('courtSeconds', () => {
+  it('reads every listed player the way livePlayerSeconds does', () => {
+    const s = all([{ ...lineup('H', ['a', 'b', 'c', 'd', 'e']), elapsed: 0 },
+      { type: 'sub', teamId: 'H', playerInId: 'z', playerOutId: 'c', elapsed: 300 }]);
+    expect(courtSeconds(s, ['a', 'c', 'z', 'nobody'], 900)).toEqual({ a: 900, c: 300, z: 600, nobody: 0 });
+  });
+
+  it('is empty for no players', () => {
+    expect(courtSeconds(all([]), [], 900)).toEqual({});
+  });
 });
 
 describe('missingStatSlugs', () => {
   it('names the columns that still need creating', () => {
-    expect(missingStatSlugs([{ slug: 'points' }])).toEqual(['fouls']);
+    expect(missingStatSlugs([{ slug: 'points' }])).toEqual(['3s_made', '2s_made', '1s_made', 'fouls', 'minutes']);
   });
 
-  it('is empty once points and fouls exist', () => {
-    expect(missingStatSlugs(['points', 'fouls'].map(slug => ({ slug })))).toEqual([]);
+  it('is empty once every column the tracker writes exists', () => {
+    expect(missingStatSlugs(['points', '3s_made', '2s_made', '1s_made', 'fouls', 'minutes'].map(slug => ({ slug })))).toEqual([]);
   });
 });
 
