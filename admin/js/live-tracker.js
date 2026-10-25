@@ -16,23 +16,37 @@
  *  - "Jersey numbers" opens a panel down the left side to add or change every
  *    player's number, both teams at once. A number saves to that player the
  *    moment its box is left (or Enter is pressed) and shows on the tiles at once.
+ *  - "Timeout" on a team's court records one for them and stops the clock. How
+ *    many each team has left follows the league's rules (the admin's Rules
+ *    page: so many a game or a half, and any extra in overtime), which the
+ *    "Timeouts" button changes for this game alone — before tip-off, say. The
+ *    bonus, fouling out and the length of a half and an overtime follow the
+ *    Rules page too.
+ *  - The ◀ ▶ under the clock is the possession arrow: tap the side it points to.
+ *    Setting it after the opening tip and flipping it once it is used are both
+ *    a tap, and both go in the log, so Undo takes either back.
  *
  * The event log is the source of truth and lives in localStorage per game, so
  * a refresh, a locked tablet or a dropped connection mid-game loses nothing.
- * Saving derives totals and posts them through the existing admin-game-stats
- * function, which already recomputes the final score.
+ * Nothing waits for a button: the stats a moment after each tap (through the
+ * existing admin-game-stats function, which recomputes the score) and the
+ * play-by-play a moment after that, both retried until they land.
  */
 
 import {
   deriveState, appendEvent, undo, redo, canUndo, canRedo,
-  toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, courtSeconds, hasRecordedStats,
+  toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, courtSeconds, hasRecordedStats, didNotPlay,
   changedStatValues, statValueKey, bonusFor, bonusLabel, periodLabel, rewindClock, PERIOD_OPTIONS, MAX_PERIOD,
-  LINEUP_SIZE, DEFAULT_PERIOD_SECONDS,
+  LINEUP_SIZE,
 } from '../../lib/game-tracker.js';
 import { hasJersey, jerseyValue, typedJersey, numberDuplicates } from '../../lib/jersey.js';
 import { saveJerseyNumber, setLoadedJersey } from './jersey.js';
 import { playBonusHorn } from './tracker-sound.js';
-import { trackerStorageKey, effectiveEvents, saveGameLog } from './game-log-store.js';
+import { trackerStorageKey, effectiveEvents, extendsSavedLog, saveGameLog } from './game-log-store.js';
+import { createAutosave } from './autosave.js';
+import { gameStatus, REGULATION_PERIODS } from '../../lib/game-clock.js';
+import { getGameLog } from '../../lib/api.js';
+import { gameRules, withGameTimeouts, timeoutsLeft, timeoutRuleText, timeoutRuleShort, carryText, sameRules, scopeText, MAX_TIMEOUTS } from '../../lib/game-rules.js';
 
 const storageKey = trackerStorageKey;
 
@@ -41,6 +55,16 @@ const storageKey = trackerStorageKey;
  * long enough that a quick correction (tap, undo) is a single write.
  */
 const AUTO_SYNC_MS = 900;
+
+/**
+ * The play-by-play saves this long after the last change: after the score
+ * push, which viewers are waiting on, and late enough that a run of taps is
+ * one save.
+ */
+const LOG_SAVE_MS = 1500;
+
+/** A failed save — stats or play-by-play — is tried again this long after, or with the next tap. */
+const RETRY_MS = 10000;
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -82,13 +106,24 @@ export function openLiveTracker(game, ctx) {
   /** "#23 Saif" — number and first name, for the tight "In for" buttons. */
   const shortLabelOf = (id) => (numberById[id] != null ? `#${numberById[id]} ` : '') + String(nameOf(id)).split(' ')[0];
   const cfg = { homeTeamId: homeTeam.id, awayTeamId: awayTeam.id };
+  const teamById = { [homeTeam.id]: homeTeam, [awayTeam.id]: awayTeam };
+  const teamNameOf = (id) => teamById[id]?.name || '—';
+  /** The league's rules (the admin's Rules page), as loaded with the season. */
+  const leagueRules = gameRules(config.DB.contentBlocks?.game_rules);
+  /** This game's: the league's, with its timeouts changed if the "Timeouts" button changed them. */
+  const currentRules = () => withGameTimeouts(leagueRules, session.rules);
+  // Only the timeouts can be changed for one game: fouls and the clock are always the league's.
+  const halfSeconds = leagueRules.halfMinutes * 60;
+  const overtimeSeconds = leagueRules.overtimeMinutes * 60;
 
   // ---- persisted session -------------------------------------------------
   const blank = {
     events: [],
     cursor: 0,
-    periodSeconds: DEFAULT_PERIOD_SECONDS,
-    clock: DEFAULT_PERIOD_SECONDS,
+    // A half's length, from the league's rules; setting the clock longer for
+    // a game makes that game's halves longer.
+    periodSeconds: halfSeconds,
+    clock: halfSeconds,
     period: 1,
     running: false,
     /** Mirrors games.status so a reopened tracker knows where it left off. */
@@ -101,6 +136,10 @@ export function openLiveTracker(game, ctx) {
     // The schedule shows the home team blue and the away team white; teams
     // whose jerseys are the other way round get swapped here, per game.
     colorsSwapped: false,
+    // Timeout rules changed for this game alone ("Timeouts" button), or null
+    // for the league's. Like the period length, a deliberate choice: it
+    // survives the game being marked not started.
+    rules: null,
   };
   let session = blank;
   try {
@@ -130,6 +169,11 @@ export function openLiveTracker(game, ctx) {
                 ${PERIOD_OPTIONS.map(o => `<option value="${o.value}">${esc(o.label)}</option>`).join('')}
               </select>
             </div>
+            <div class="lt-arrow" id="lt-arrow" role="group" aria-label="Possession arrow">
+              <button type="button" class="lt-arrow-btn" data-arrow="${esc(homeTeam.id)}" aria-pressed="false" title="Point the possession arrow at ${esc(homeTeam.name)}">◀</button>
+              <span class="lt-arrow-label"><span class="lt-arrow-cap" id="lt-arrow-cap">Set</span><span class="lt-arrow-team" id="lt-arrow-team">arrow</span></span>
+              <button type="button" class="lt-arrow-btn" data-arrow="${esc(awayTeam.id)}" aria-pressed="false" title="Point the possession arrow at ${esc(awayTeam.name)}">▶</button>
+            </div>
           </div>
           <div class="lt-team-score" data-team="${esc(awayTeam.id)}"><span class="lt-team-name">${esc(awayTeam.name)}</span><span class="lt-score" id="lt-away-score">0</span></div>
         </div>
@@ -137,6 +181,7 @@ export function openLiveTracker(game, ctx) {
           <button type="button" id="lt-undo" class="lt-btn">↶ Undo</button>
           <button type="button" id="lt-redo" class="lt-btn">↷ Redo</button>
           <button type="button" id="lt-swap-colors" class="lt-btn" title="Swap which team is white and which is blue">⇄ Swap colors</button>
+          <button type="button" id="lt-rules" class="lt-btn">Timeouts <span id="lt-rules-label"></span><span class="lt-badge" id="lt-rules-badge" hidden>this game</span></button>
           <button type="button" id="lt-numbers" class="lt-btn" title="Add or change the players' jersey numbers">Jersey numbers<span class="lt-badge" id="lt-numbers-badge" hidden></span></button>
           <button type="button" id="lt-not-started" class="lt-btn" title="Put this game back to not started: no score, not live">Mark not started</button>
           <button type="button" id="lt-end" class="lt-btn">End game</button>
@@ -145,30 +190,26 @@ export function openLiveTracker(game, ctx) {
         </div>
         <div class="lt-sync" id="lt-sync">Live · not yet saved</div>
         <div class="lt-sync lt-sync-note" id="lt-clock-note" hidden></div>
+        <div class="lt-sync lt-sync-error" id="lt-log-note" role="status" hidden></div>
       </div>
 
       <div class="lt-courts">
-        <div class="lt-court" data-team="${esc(homeTeam.id)}">
+        ${[homeTeam, awayTeam].map(team => `
+        <div class="lt-court" data-team="${esc(team.id)}">
           <div class="lt-court-title">
-            <span class="lt-court-head"><span class="lt-court-team">${esc(homeTeam.name)}</span><span class="lt-bonus" id="lt-bonus-${esc(homeTeam.id)}" hidden></span></span>
-            <span class="lt-team-fouls" id="lt-fouls-${esc(homeTeam.id)}"></span>
+            <span class="lt-court-head"><span class="lt-court-team">${esc(team.name)}</span><span class="lt-bonus" id="lt-bonus-${esc(team.id)}" hidden></span></span>
+            <span class="lt-court-tools">
+              <span class="lt-team-fouls" id="lt-fouls-${esc(team.id)}"></span>
+              <button type="button" class="lt-btn lt-timeout" id="lt-to-${esc(team.id)}" data-team="${esc(team.id)}">Timeout<span class="lt-to-left" id="lt-to-left-${esc(team.id)}"></span></button>
+            </span>
           </div>
-          <div class="lt-floor" id="lt-floor-${esc(homeTeam.id)}"></div>
+          <div class="lt-floor" id="lt-floor-${esc(team.id)}"></div>
           <div class="lt-bench-title">Bench</div>
-          <div class="lt-bench" id="lt-bench-${esc(homeTeam.id)}"></div>
-        </div>
-        <div class="lt-court" data-team="${esc(awayTeam.id)}">
-          <div class="lt-court-title">
-            <span class="lt-court-head"><span class="lt-court-team">${esc(awayTeam.name)}</span><span class="lt-bonus" id="lt-bonus-${esc(awayTeam.id)}" hidden></span></span>
-            <span class="lt-team-fouls" id="lt-fouls-${esc(awayTeam.id)}"></span>
-          </div>
-          <div class="lt-floor" id="lt-floor-${esc(awayTeam.id)}"></div>
-          <div class="lt-bench-title">Bench</div>
-          <div class="lt-bench" id="lt-bench-${esc(awayTeam.id)}"></div>
-        </div>
+          <div class="lt-bench" id="lt-bench-${esc(team.id)}"></div>
+        </div>`).join('')}
       </div>
 
-      <p class="lt-hint">Tap a player for +1, +2, +3, a foul or −Foul. Tap someone on the bench to sub them in, or drag them onto whoever is coming off.</p>
+      <p class="lt-hint">Tap a player for +1, +2, +3, a foul or −Foul. Tap someone on the bench to sub them in, or drag them onto whoever is coming off. Timeout records one for that team and stops the clock (<span id="lt-hint-rule"></span>). ◀ ▶ under the clock is the possession arrow: tap the side it points to.</p>
 
       <div class="lt-log-wrap">
         <div class="lt-log-title">Play log</div>
@@ -203,7 +244,27 @@ export function openLiveTracker(game, ctx) {
           </div>`).join('') || '<div class="lt-empty">No players on this team yet.</div>'}
         </section>`).join('')}
       </div>
-    </aside>`;
+    </aside>
+
+    <div class="lt-drawer-scrim" id="lt-rules-scrim"></div>
+    <div class="lt-modal" id="lt-rules-dialog" role="dialog" aria-modal="true" aria-labelledby="lt-rules-title" aria-hidden="true">
+      <div class="lt-drawer-title" id="lt-rules-title">Timeouts this game</div>
+      <p class="lt-drawer-hint" id="lt-rules-league"></p>
+      <form class="lt-rules-form" id="lt-rules-form">
+        <label class="lt-rules-row"><span>Timeouts per team</span>
+          <input class="lt-rules-input" id="lt-rules-timeouts" type="number" inputmode="numeric" min="0" max="${MAX_TIMEOUTS}" step="1" required></label>
+        <label class="lt-rules-row"><span>Counted per</span>
+          <select class="lt-rules-input" id="lt-rules-per"><option value="game">Game</option><option value="half">Half</option></select></label>
+        <label class="lt-rules-row"><span>Extra each overtime</span>
+          <input class="lt-rules-input" id="lt-rules-ot" type="number" inputmode="numeric" min="0" max="${MAX_TIMEOUTS}" step="1" required></label>
+        <p class="lt-rules-note" id="lt-rules-note"></p>
+        <div class="lt-rules-actions">
+          <button type="submit" class="lt-btn lt-btn-save">Use for this game</button>
+          <button type="button" class="lt-btn" id="lt-rules-reset">Back to league rules</button>
+          <button type="button" class="lt-btn" id="lt-rules-cancel">Cancel</button>
+        </div>
+      </form>
+    </div>`;
   document.body.appendChild(wrap);
 
   const $ = (id) => wrap.querySelector('#' + id);
@@ -230,6 +291,7 @@ export function openLiveTracker(game, ctx) {
     persist();
     render();
     queueAutoSync();
+    logSave.changed();
     // The first thing recorded is what makes a game live for viewers.
     if (!session.status || session.status === 'scheduled') pushGameState('live');
   }
@@ -247,6 +309,8 @@ export function openLiveTracker(game, ctx) {
   let lastSent = new Map();
   /** The push on its way, for End game to wait out before sending minutes. */
   let syncInFlight = null;
+  /** Set on Close: a failed push is no longer retried on a timer. */
+  let closed = false;
 
   function queueAutoSync() {
     if (autoSync === false || resetting) return;
@@ -260,7 +324,7 @@ export function openLiveTracker(game, ctx) {
    *   would slow the push viewers are waiting on (see `toStatValues`).
    */
   async function runAutoSync({ withMinutes = false } = {}) {
-    if (autoSync === false) return;
+    if (autoSync === false || resetting) return;
     if (syncing) { syncPending = true; return; }       // fold into the next run
     const defs = config.DB.statDefinitions || [];
     if (!defs.length) return;
@@ -278,6 +342,7 @@ export function openLiveTracker(game, ctx) {
     if (!changed.length) { setSyncState('saved'); return; }
 
     syncing = true;
+    let failed = false;
     setSyncState('saving');
     try {
       // No DNP list mid-game — players simply may not have come on yet.
@@ -290,11 +355,36 @@ export function openLiveTracker(game, ctx) {
       changed.forEach(v => lastSent.set(statValueKey(v), v.value));
       setSyncState('saved');
     } catch (err) {
-      // Keep scoring; the next event retries and Save is still the backstop.
+      // Keep scoring: the next tap retries, or a timer does if none comes —
+      // the last basket of a game must not wait for a tap that never comes.
+      failed = true;
       setSyncState('error', err.message);
     } finally {
       syncing = false;
       if (syncPending) { syncPending = false; queueAutoSync(); }
+      else if (failed && !closed && !resetting) { clearTimeout(syncTimer); syncTimer = setTimeout(runAutoSync, RETRY_MS); }
+    }
+  }
+
+  /**
+   * End game marks who never got on the floor as DNP, as Save does: the live
+   * push wrote a zero row for everyone on both rosters, and without this a game
+   * ended but never saved counts as a game played for everyone who sat on the
+   * bench (the site's games-played, and the career stats). The rows of anyone
+   * who sat out are deleted; lastSent keeps their zeros, so later pushes do not
+   * write them back.
+   */
+  async function sendDidNotPlay() {
+    if (autoSync === false || !hasRecordedStats(state().players)) return;
+    const rosterIds = [...rosterOf(homeTeam), ...rosterOf(awayTeam)].map(p => p.id);
+    const dnp = didNotPlay(session.events, session.cursor, rosterIds);
+    try {
+      await adminFetch('admin-game-stats', {
+        method: 'POST',
+        body: JSON.stringify({ game_id: game.gameId, values: [], dnp_player_ids: dnp }),
+      });
+    } catch (err) {
+      setSyncState('error', err.message);
     }
   }
 
@@ -350,40 +440,53 @@ export function openLiveTracker(game, ctx) {
   }
 
   /**
-   * Save the play-by-play (`game_logs`, migration 013) so a final game's box
-   * score can show it. Sent whole at the natural breaks — period changes, the
-   * half-time buzzer, End game, Save and closing — never per tap: it is only
-   * shown once the game is over, and the device keeps the log meanwhile.
-   * Never blocks scoring; a failure is named once, then retried at the next break.
-   * Sends run one after another, each taking the log as it is when its turn
-   * comes, so an earlier send can never land after a later one and overwrite it.
-   *
-   * @returns {Promise<{ ok: boolean, error?: string }>}
+   * Save the play-by-play (`game_logs`, migration 013) as it happens, like the
+   * stats: every change to the log — a play, an undo or redo, the clock set
+   * back — saves it whole a moment later (`LOG_SAVE_MS`). Saves run one after
+   * another, each sending the log as it is when its turn comes, so an older
+   * one never lands after a newer one. One that fails is retried until it
+   * lands, and a line under the scoreboard says so meanwhile. End game and
+   * Save wait for it and say how it went; the device keeps the log
+   * regardless, and opening the game again sends whatever never arrived.
    */
-  let logWarned = false;
-  let logPush = Promise.resolve();
-  function pushGameLog() {
-    const run = logPush.then(sendGameLog);
-    logPush = run;
-    return run;
-  }
-  async function sendGameLog() {
-    const events = effectiveEvents(session);
-    if (!events.length) return { ok: true };
-    try {
+  const logSave = createAutosave({
+    delay: LOG_SAVE_MS,
+    retryDelay: RETRY_MS,
+    auto: autoSync !== false,
+    save: async () => {
+      const events = effectiveEvents(session);
+      // Nothing to show (everything undone): leave what is saved. Marking the
+      // game not started is what removes a saved log.
+      if (!events.length) return;
       await saveGameLog({ adminFetch, gameId: game.gameId, events, names: nameById });
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: err?.message || String(err) };
-    }
-  }
-  /** For the breaks that do not say anything themselves: report a failure once. */
-  function pushGameLogQuietly() {
-    pushGameLog().then((r) => {
-      if (r.ok || logWarned) return;
-      logWarned = true;
-      flash(`Game log not saved yet: ${r.error}`);
-    });
+    },
+    onState: ({ ok, error }) => {
+      const note = $('lt-log-note');
+      if (!note) return;
+      note.hidden = ok;
+      if (!ok) note.textContent = `Play-by-play not saved yet — retrying (${error}). This device keeps it meanwhile.`;
+    },
+  });
+
+  /**
+   * On opening: if this device holds plays the database does not — tracked
+   * offline, or before the play-by-play was saved as it happens — send them
+   * now. Only when nothing is saved for the game or the saved log is the
+   * start of this one, so a log another device saved is never replaced by
+   * opening an old one here; and only for a game that is under way or over,
+   * not one since put back to not started elsewhere.
+   */
+  async function sendUnsavedLog() {
+    const events = effectiveEvents(session);
+    if (!events.length || !ctx.supabase || gameStatus(game) === 'scheduled') return;
+    try {
+      const { data: saved, error } = await getGameLog(ctx.supabase, game.gameId);
+      if (error) return;   // no migration 013, or offline: the next tap tries anyway
+      if (!extendsSavedLog(saved?.events, events)) return;
+      logSave.changed();
+      const res = await logSave.flush();
+      if (res.ok) flash('Play-by-play kept on this device is now saved.');
+    } catch (_) { /* the device still holds it; the next tap sends it */ }
   }
 
   function setSyncState(kind, detail) {
@@ -417,7 +520,7 @@ export function openLiveTracker(game, ctx) {
     const number = numberById[p.id];
     const open = menuFor === p.id;
     return `<div class="lt-slot${open ? ' lt-slot-open' : ''}">
-      <button type="button" class="lt-player${onCourt ? ' lt-on-court' : ' lt-bench-chip'}${fouls >= 5 ? ' lt-fouled-out' : ''}${open ? ' lt-menu-open' : ''}"
+      <button type="button" class="lt-player${onCourt ? ' lt-on-court' : ' lt-bench-chip'}${fouls >= leagueRules.foulOutFouls ? ' lt-fouled-out' : ''}${open ? ' lt-menu-open' : ''}"
         data-player="${esc(p.id)}" data-team="${esc(p.teamId)}" data-oncourt="${onCourt ? '1' : '0'}" aria-expanded="${open}">
         <span class="lt-player-num${number == null ? ' lt-player-num-none' : ''}">${number == null ? '–' : esc(number)}</span>
         <span class="lt-player-name">${esc(p.name)}</span>
@@ -478,7 +581,7 @@ export function openLiveTracker(game, ctx) {
       // The bonus is a per-half count, and it is the OPPONENT's fouls that
       // put this team in it — see `bonusFor`.
       const opponentId = team.id === homeTeam.id ? awayTeam.id : homeTeam.id;
-      const { halfFouls, penalty, bonus } = bonusFor(derived, team.id, opponentId);
+      const { halfFouls, penalty, bonus } = bonusFor(derived, team.id, opponentId, leagueRules);
 
       const foulsEl = $(`lt-fouls-${team.id}`);
       foulsEl.textContent = halfFouls ? `${halfFouls} team fouls` : '';
@@ -500,6 +603,14 @@ export function openLiveTracker(game, ctx) {
         flash(`${team.name} — ${bonusLabel(bonus)}.`);
       }
 
+      const to = timeoutsLeft(derived, team.id, currentRules());
+      const toBtn = $(`lt-to-${team.id}`);
+      $(`lt-to-left-${team.id}`).textContent = timeoutPips(to);
+      toBtn.classList.toggle('lt-timeout-none', !to.left);
+      const toText = `${to.left} of ${to.allowed} timeout${to.allowed === 1 ? '' : 's'} left ${scopeText(to.scope)}`;
+      toBtn.title = `Call a timeout for ${team.name} (${toText}). Stops the clock.`;
+      toBtn.setAttribute('aria-label', `Timeout for ${team.name}: ${toText}`);
+
       if (!onCourt.length) {
         floor.innerHTML = `<div class="lt-pick-five">Pick the starting ${LINEUP_SIZE} — tap players below.</div>`;
         bench.innerHTML = roster.map(p => playerTile(p, derived, { onCourt: false })).join('')
@@ -516,15 +627,41 @@ export function openLiveTracker(game, ctx) {
         || '<span class="lt-empty">Everyone is on the floor.</span>';
     });
 
+    // This game's timeout rule, on its button and in the hint.
+    const ruleNow = currentRules();
+    $('lt-rules-label').textContent = timeoutRuleShort(ruleNow);
+    $('lt-rules-badge').hidden = !session.rules;
+    $('lt-rules').title = `Timeouts this game: ${timeoutRuleText(ruleNow)}${session.rules ? ' (changed for this game)' : ' (league rules)'}. Tap to change them for this game.`;
+    $('lt-hint-rule').textContent = timeoutRuleText(ruleNow);
+
+    // The possession arrow: the side it points to is lit in that team's colour.
+    wrap.querySelectorAll('.lt-arrow-btn').forEach(b => {
+      const on = derived.arrow === b.dataset.arrow;
+      b.dataset.color = teamColor(b.dataset.arrow);
+      b.classList.toggle('lt-arrow-on', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+    $('lt-arrow').classList.toggle('lt-arrow-unset', !derived.arrow);
+    // Named as well as pointed at: on a phone held upright the away team sits
+    // under the clock rather than to its right.
+    $('lt-arrow-cap').textContent = derived.arrow ? 'Arrow' : 'Set';
+    $('lt-arrow-team').textContent = derived.arrow ? teamNameOf(derived.arrow) : 'arrow';
+    if (derived.arrow) $('lt-arrow-team').dataset.color = teamColor(derived.arrow);
+    else delete $('lt-arrow-team').dataset.color;
+    $('lt-arrow').title = derived.arrow
+      ? `Possession arrow: ${teamNameOf(derived.arrow)}'s ball at the next held ball. Tap the other side once it is used.`
+      : 'Possession arrow: after the opening tip, tap the side of the team that did not win it.';
+
     $('lt-undo').disabled = !canUndo(session.cursor);
     $('lt-redo').disabled = !canRedo(session.events, session.cursor);
     const last = session.events[session.cursor - 1];
-    $('lt-undo').title = last ? `Undo${describeEvent(last, nameOf) ? `: ${describeEvent(last, nameOf)}` : ''}` : 'Nothing to undo';
+    const lastText = describeEvent(last, nameOf, teamNameOf);
+    $('lt-undo').title = last ? `Undo${lastText ? `: ${lastText}` : ''}` : 'Nothing to undo';
 
     // An older game's rebounds, assists and the like have no description any more.
-    const shown = session.events.slice(0, session.cursor).filter(e => describeEvent(e, nameOf)).slice(-40).reverse();
+    const shown = session.events.slice(0, session.cursor).filter(e => describeEvent(e, nameOf, teamNameOf)).slice(-40).reverse();
     $('lt-log').innerHTML = shown.length
-      ? shown.map(e => `<div class="lt-log-row"><span class="lt-log-clock">${esc(`${periodLabel(e.period)} ${formatClock(e.clock)}`)}</span>${esc(describeEvent(e, nameOf))}</div>`).join('')
+      ? shown.map(e => `<div class="lt-log-row"><span class="lt-log-clock">${esc(`${periodLabel(e.period)} ${formatClock(e.clock)}`)}</span>${esc(describeEvent(e, nameOf, teamNameOf))}</div>`).join('')
       : '<div class="lt-empty">Nothing recorded yet.</div>';
 
     bonusPrimed = true;
@@ -608,6 +745,104 @@ export function openLiveTracker(game, ctx) {
     flash._t = setTimeout(() => { el.textContent = ''; }, 2600);
   }
 
+  // ---- timeouts and the possession arrow -----------------------------------
+  /** ●●○ for what a team has left, or "2 left" where there are too many to show as dots. */
+  function timeoutPips({ allowed, left }) {
+    if (!allowed) return 'none';
+    if (allowed > 6) return `${left} left`;
+    return '●'.repeat(left) + '○'.repeat(allowed - left);
+  }
+
+  /**
+   * A timeout for one team. It stops the clock, as a timeout does, and viewers
+   * see it stopped. A team with none left can still be given one — the tracker
+   * records what happened — but only once the scorekeeper confirms it.
+   */
+  function callTimeout(teamId) {
+    if (resetting) return;
+    const team = teamById[teamId];
+    if (!team) return;
+    const before = timeoutsLeft(state(), teamId, currentRules());
+    if (!before.left && !confirm(`${team.name} ${before.allowed ? 'has no timeouts left' : 'gets no timeouts'} ${scopeText(before.scope)}.\n\nRecord one anyway?`)) return;
+    const wasRunning = session.running;
+    if (wasRunning) stopClock();
+    record({ type: 'timeout', teamId });
+    if (wasRunning) pushGameState('live');
+    const after = timeoutsLeft(state(), teamId, currentRules());
+    flash(`Timeout — ${team.name}. ${after.left} left ${scopeText(after.scope)}.${wasRunning ? ' Clock stopped.' : ''}`);
+  }
+
+  /** Point the possession arrow at a team: after the opening tip, and each time it is used. */
+  function pointArrow(teamId) {
+    if (resetting || !teamById[teamId]) return;
+    if (state().arrow === teamId) { flash(`The arrow already points to ${teamNameOf(teamId)}.`); return; }
+    record({ type: 'arrow', teamId });
+    flash(`Possession arrow → ${teamNameOf(teamId)}.`);
+  }
+
+  wrap.querySelectorAll('.lt-timeout').forEach(b => { b.onclick = () => callTimeout(b.dataset.team); });
+  wrap.querySelectorAll('.lt-arrow-btn').forEach(b => { b.onclick = () => pointArrow(b.dataset.arrow); });
+
+  // ---- timeouts for this game --------------------------------------------
+  // The league's rule, changed for one game — before tip-off, typically. It is
+  // kept in this game's session (this device), not in the league's settings.
+  const rulesDialog = $('lt-rules-dialog');
+  const rulesScrim = $('lt-rules-scrim');
+  let rulesOpen = false;
+  const readRules = () => gameRules({
+    timeouts: $('lt-rules-timeouts').value === '' ? NaN : Number($('lt-rules-timeouts').value),
+    timeoutsPer: $('lt-rules-per').value,
+    overtimeTimeouts: $('lt-rules-ot').value === '' ? NaN : Number($('lt-rules-ot').value),
+  });
+  const showRulesNote = () => { $('lt-rules-note').textContent = carryText(readRules()); };
+
+  function openRules() {
+    if (rulesOpen) return;
+    menuFor = null;
+    render();
+    const r = currentRules();
+    $('lt-rules-timeouts').value = r.timeouts;
+    $('lt-rules-per').value = r.timeoutsPer;
+    $('lt-rules-ot').value = r.overtimeTimeouts;
+    $('lt-rules-league').textContent = `League rules (the admin's Rules page): ${timeoutRuleText(leagueRules)}. A change here is for this game only.`;
+    $('lt-rules-reset').hidden = !session.rules;
+    showRulesNote();
+    rulesOpen = true;
+    rulesDialog.classList.add('lt-modal-open');
+    rulesScrim.classList.add('lt-drawer-open');
+    rulesDialog.removeAttribute('aria-hidden');
+    panelEl.inert = true;
+    $('lt-rules-timeouts').focus();
+    $('lt-rules-timeouts').select();
+  }
+
+  function closeRules() {
+    if (!rulesOpen) return;
+    rulesOpen = false;
+    rulesDialog.classList.remove('lt-modal-open');
+    rulesScrim.classList.remove('lt-drawer-open');
+    rulesDialog.setAttribute('aria-hidden', 'true');
+    panelEl.inert = false;
+    if (rulesDialog.contains(document.activeElement)) document.activeElement.blur();
+    $('lt-rules').focus({ preventScroll: true });
+  }
+
+  /** Keep a rule for this game; one that matches the league's is no change at all. */
+  function setGameRules(next) {
+    session.rules = next && !sameRules(next, leagueRules) ? next : null;
+    persist();
+    closeRules();
+    render();
+    flash(`Timeouts this game: ${timeoutRuleText(currentRules())}${session.rules ? '' : ' (league rules)'}.`);
+  }
+
+  $('lt-rules').onclick = openRules;
+  $('lt-rules-cancel').onclick = closeRules;
+  rulesScrim.onclick = closeRules;
+  $('lt-rules-reset').onclick = () => setGameRules(null);
+  $('lt-rules-form').addEventListener('input', showRulesNote);
+  $('lt-rules-form').addEventListener('submit', (e) => { e.preventDefault(); setGameRules(readRules()); });
+
   // Pointer-based: works with touch, pen and mouse alike. A press on a player
   // that never moves far is a tap; one that does is a drag, which is how a
   // bench player can be dropped onto whoever is coming off.
@@ -688,6 +923,7 @@ export function openLiveTracker(game, ctx) {
   });
   const onKeydown = (e) => {
     if (e.key !== 'Escape') return;
+    if (rulesOpen) { closeRules(); return; }
     if (numbersOpen) { closeNumbers(); return; }
     if (!menuFor) return;
     const id = menuFor;
@@ -921,7 +1157,7 @@ export function openLiveTracker(game, ctx) {
         // scorekeeper to call the game.
         const atBreak = session.period < 2;
         pushGameState(atBreak ? 'halftime' : 'live');
-        pushGameLogQuietly();
+        logSave.flush();
         flash(atBreak ? 'Half time.' : 'Period over.');
       }
     }, 1000);
@@ -950,6 +1186,7 @@ export function openLiveTracker(game, ctx) {
       });
       session.events = events;
       session.elapsed = elapsed;
+      if (rewound) logSave.changed();
       if (rewound) flash(`Clock set back ${formatClock(rewound)} — taken off the minutes of whoever was on the floor.`);
     }
     session.clock = secs;
@@ -968,15 +1205,22 @@ export function openLiveTracker(game, ctx) {
     if (!Number.isFinite(next) || next === session.period) return;
     stopClock();
     session.period = next;
-    session.clock = session.periodSeconds;
+    // An overtime is the league's overtime length; a half, this game's half.
+    session.clock = next > REGULATION_PERIODS ? overtimeSeconds : session.periodSeconds;
     record({ type: 'period', period: next });
     pushGameState('live');
-    pushGameLogQuietly();
+    logSave.flush();
   };
 
   // ---- undo / redo / save ------------------------------------------------
-  $('lt-undo').onclick = () => { session.cursor = undo(session.cursor); persist(); render(); queueAutoSync(); };
-  $('lt-redo').onclick = () => { session.cursor = redo(session.events, session.cursor); persist(); render(); queueAutoSync(); };
+  $('lt-undo').onclick = () => {
+    if (resetting) return;
+    session.cursor = undo(session.cursor); persist(); render(); queueAutoSync(); logSave.changed();
+  };
+  $('lt-redo').onclick = () => {
+    if (resetting) return;
+    session.cursor = redo(session.events, session.cursor); persist(); render(); queueAutoSync(); logSave.changed();
+  };
   $('lt-swap-colors').onclick = () => { session.colorsSwapped = !session.colorsSwapped; persist(); render(); };
 
   // ---- mark not started --------------------------------------------------
@@ -992,8 +1236,13 @@ export function openLiveTracker(game, ctx) {
     try {
       clearTimeout(syncTimer);
       syncPending = false;
+      logSave.cancel();
       while (syncing) await new Promise(r => setTimeout(r, 100));
       await statePush;
+      // A log save on its way would put the log back after clearGame deletes
+      // it; one that failed meanwhile has queued a retry, so cancel again.
+      await logSave.idle();
+      logSave.cancel();
       const rosterIds = [...rosterOf(homeTeam), ...rosterOf(awayTeam)].map(p => p.id);
       const { clearGame } = await import('./game-reset.js');
       await clearGame({ adminFetch, gameId: game.gameId, rosterPlayerIds: rosterIds });
@@ -1003,9 +1252,10 @@ export function openLiveTracker(game, ctx) {
       // scheduled) — reset the local session to match, or the picker and
       // clock stay wherever they were left (e.g. still showing "OT1"),
       // which reads as if the reset hadn't really worked. The period
-      // length and the team colours are deliberate choices, so they — and
-      // only they — survive it.
-      session = { ...blank, periodSeconds: session.periodSeconds, clock: session.periodSeconds, colorsSwapped: session.colorsSwapped };
+      // length, the team colours and this game's timeout rules are
+      // deliberate choices, so they — and only they — survive it.
+      session = { ...blank, periodSeconds: session.periodSeconds, clock: session.periodSeconds, colorsSwapped: session.colorsSwapped, rules: session.rules };
+      logSave.reset();
       persist();
       render();
       const sync = $('lt-sync');
@@ -1043,8 +1293,12 @@ export function openLiveTracker(game, ctx) {
     // before this does, so `syncing` is clear by the time we go on.
     if (syncing) await syncInFlight?.catch(() => {});
     await runAutoSync({ withMinutes: true });   // the last baskets, and everyone's minutes
+    await sendDidNotPlay();
     await pushGameState('final');
-    const log = await pushGameLog();
+    // Sent even if nothing changed since the last save: ending the game says
+    // this is the game, so the database gets this log whatever it held.
+    logSave.changed();
+    const log = await logSave.flush();
     flash(`Game ended — viewers now see the final score${log.ok ? ' and the game log' : ''}.`
       + (log.ok ? '' : ` Game log not saved: ${log.error}`));
   };
@@ -1052,9 +1306,13 @@ export function openLiveTracker(game, ctx) {
   $('lt-close').onclick = () => {
     stopClock();
     persist();
-    // The last chance this session has to send the log; nobody is left to tell.
-    pushGameLog();
+    // Send anything not yet saved; nobody is left to tell if it fails, but the
+    // device keeps it and opening the game again sends it.
+    logSave.flush();
+    logSave.stop();
+    closed = true;
     document.removeEventListener('keydown', onKeydown);
+    document.removeEventListener('visibilitychange', onHidden);
     wrap.remove();
   };
 
@@ -1093,12 +1351,7 @@ export function openLiveTracker(game, ctx) {
     if (!confirm('Save these stats? This replaces whatever is currently recorded for this game.')) return;
 
     // Anyone on the roster who never appeared is a DNP for this game.
-    const appeared = new Set(Object.keys(derived.players));
-    session.events.slice(0, session.cursor).forEach(e => {
-      if (e.type === 'lineup') (e.playerIds || []).forEach(id => appeared.add(id));
-      if (e.type === 'sub') { appeared.add(e.playerInId); appeared.add(e.playerOutId); }
-    });
-    const dnp = rosterIds.filter(id => !appeared.has(id));
+    const dnp = didNotPlay(session.events, session.cursor, rosterIds);
 
     $('lt-save').disabled = true;
     flash('Saving…');
@@ -1107,7 +1360,8 @@ export function openLiveTracker(game, ctx) {
         method: 'POST',
         body: JSON.stringify({ game_id: game.gameId, values, dnp_player_ids: dnp }),
       });
-      const log = await pushGameLog();
+      logSave.changed();
+      const log = await logSave.flush();
       flash(`Saved. ${missing.length ? `Not recorded (no stat column yet): ${missing.join(', ')}. ` : ''}`
         + (log.ok ? '' : `Game log not saved: ${log.error}`));
       if (ctx.onSaved) await ctx.onSaved();
@@ -1118,8 +1372,19 @@ export function openLiveTracker(game, ctx) {
     }
   };
 
+  // A tablet locked or a tab switched away may never run the timers again:
+  // send what is waiting now.
+  const onHidden = () => {
+    // While the game is being cleared, a save would undo the clear.
+    if (document.visibilityState !== 'hidden' || resetting) return;
+    if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; runAutoSync(); }
+    logSave.flush();
+  };
+  document.addEventListener('visibilitychange', onHidden);
+
   render();
   refreshNumbersUi();
+  sendUnsavedLog();
   if (missingStatSlugs(config.DB.statDefinitions || []).length) {
     flash(`Heads up: no stat column for ${missingStatSlugs(config.DB.statDefinitions || []).join(', ')} — those will not be saved.`);
   }

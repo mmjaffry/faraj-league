@@ -4,7 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deriveState, appendEvent, undo, redo, canUndo, canRedo,
-  toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, courtSeconds, hasRecordedStats,
+  toStatValues, missingStatSlugs, describeEvent, formatClock, livePlayerSeconds, courtSeconds, hasRecordedStats, didNotPlay,
   changedStatValues, bonusLevel, bonusLabel, bonusFor, periodLabel, rewindClock,
   LINEUP_SIZE, DEFAULT_PERIOD_SECONDS, BONUS_FOULS, DOUBLE_BONUS_FOULS, PERIOD_OPTIONS, MAX_PERIOD,
 } from '../lib/game-tracker.js';
@@ -111,6 +111,16 @@ describe('team fouls and the bonus', () => {
 
   it('survives a team it has never seen', () => {
     expect(bonusFor(all([]), 'nobody', 'also-nobody')).toEqual({ halfFouls: 0, penalty: 0, bonus: 0 });
+  });
+
+  it('follows the league\'s own limits, and has no double bonus when the league has none', () => {
+    const fiveAndEight = { bonusFouls: 5, doubleBonusFouls: 8 };
+    expect(bonusLevel(4, fiveAndEight)).toBe(0);
+    expect(bonusLevel(5, fiveAndEight)).toBe(1);
+    expect(bonusLevel(8, fiveAndEight)).toBe(2);
+    expect(bonusLevel(20, { bonusFouls: 7, doubleBonusFouls: 0 })).toBe(1);
+    expect(bonusFor(all(fouls('H', 5)), 'A', 'H', fiveAndEight).bonus).toBe(1);
+    expect(bonusFor(all(fouls('H', 5)), 'A', 'H').bonus).toBe(0);   // 7 when the league says nothing
   });
 });
 
@@ -404,8 +414,58 @@ describe('describeEvent', () => {
     expect(describeEvent({ type: 'period', period: 3 })).toBe('Now OT1');
   });
 
+  it('names the team on a timeout or the possession arrow when it can', () => {
+    const teamNameOf = (id) => ({ H: 'Noor', A: 'Ansar' }[id]);
+    expect(describeEvent({ type: 'timeout', teamId: 'H' }, nameOf, teamNameOf)).toBe('Timeout — Noor');
+    expect(describeEvent({ type: 'arrow', teamId: 'A' }, nameOf, teamNameOf)).toBe('Possession arrow → Ansar');
+    expect(describeEvent({ type: 'timeout', teamId: 'H' }, nameOf)).toBe('Timeout');
+    expect(describeEvent({ type: 'arrow', teamId: 'A' }, nameOf)).toBe('Possession arrow');
+  });
+
   it('survives a missing event', () => {
     expect(describeEvent(null)).toBe('');
+  });
+});
+
+describe('deriveState — timeouts and the possession arrow', () => {
+  const timeout = (teamId) => ({ type: 'timeout', teamId });
+  const arrow = (teamId) => ({ type: 'arrow', teamId });
+
+  it('notes the period each timeout was taken in', () => {
+    const s = all([timeout('H'), { type: 'period', period: 2 }, timeout('H'), timeout('A')]);
+    expect(s.teams.H.timeoutPeriods).toEqual([1, 2]);
+    expect(s.teams.A.timeoutPeriods).toEqual([2]);
+    expect(s.warnings).toEqual([]);
+  });
+
+  it('starts with no timeouts taken and no arrow', () => {
+    const s = all([]);
+    expect(s.teams.H.timeoutPeriods).toEqual([]);
+    expect(s.arrow).toBeNull();
+  });
+
+  it('points the arrow at the team named last, so setting and flipping are the same event', () => {
+    expect(all([arrow('A')]).arrow).toBe('A');
+    expect(all([arrow('A'), arrow('H')]).arrow).toBe('H');
+  });
+
+  it('undo takes a timeout or a flip back', () => {
+    const events = [arrow('A'), timeout('H'), arrow('H')];
+    const back = deriveState(events, 1, CFG);
+    expect(back.arrow).toBe('A');
+    expect(back.teams.H.timeoutPeriods).toEqual([]);
+  });
+
+  it('refuses a timeout or an arrow with no team, as it does a foul with no player', () => {
+    const s = all([{ type: 'timeout' }, { type: 'arrow' }]);
+    expect(s.warnings).toHaveLength(2);
+    expect(s.arrow).toBeNull();
+  });
+
+  it('leaves the score, fouls and lineups alone', () => {
+    const s = all([lineup('H', ['p1', 'p2', 'p3', 'p4', 'p5']), score('p1', 2), timeout('H'), arrow('A')]);
+    expect(s.teams.H).toMatchObject({ score: 2, fouls: 0, halfFouls: 0 });
+    expect(s.teams.H.onCourt).toEqual(['p1', 'p2', 'p3', 'p4', 'p5']);
   });
 });
 
@@ -723,5 +783,31 @@ describe('changedStatValues', () => {
 
   it('survives missing input', () => {
     expect(changedStatValues(null, new Map())).toEqual([]);
+  });
+});
+
+describe('didNotPlay', () => {
+  const roster = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'a1'];
+  const events = [
+    lineup('H', ['h1', 'h2', 'h3', 'h4', 'h5']),
+    score('a1', 2, 'A'),
+    { type: 'sub', teamId: 'H', playerInId: 'h6', playerOutId: 'h2' },
+  ];
+
+  it('lists roster players never in a five, never subbed, with nothing recorded', () => {
+    expect(didNotPlay(events, events.length, roster)).toEqual(['h7']);
+  });
+
+  it('follows the undo cursor: an undone sub means the sub never came on', () => {
+    expect(didNotPlay(events, 2, roster)).toEqual(['h6', 'h7']);
+  });
+
+  it('counts a player with only a foul as having played', () => {
+    expect(didNotPlay([{ type: 'foul', playerId: 'h7', teamId: 'H' }], 1, ['h7'])).toEqual([]);
+  });
+
+  it('is everyone before anything is recorded, and copes with nothing', () => {
+    expect(didNotPlay([], 0, ['h1'])).toEqual(['h1']);
+    expect(didNotPlay(undefined, 3, undefined)).toEqual([]);
   });
 });

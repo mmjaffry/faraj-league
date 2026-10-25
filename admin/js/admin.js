@@ -22,6 +22,7 @@ import {
   openBoxScoreFullscreen,
   closeBoxScoreFullscreen,
 } from '../../js/render.js';
+import { friendlyDbError } from '../../lib/db-errors.js';
 
 // The admin sees every stat the league records; the public site only PUBLIC_STAT_SLUGS.
 config.SHOW_ALL_STATS = true;
@@ -78,7 +79,9 @@ async function adminFetch(fnName, options = {}) {
     },
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Request failed: ${res.status}`);
+  // The database refuses some changes outright (a player with stats, a team with
+  // games): say those in plain words.
+  if (!res.ok) throw new Error(data.error ? friendlyDbError(data.error) : `Request failed: ${res.status}`);
   return data;
 }
 
@@ -192,6 +195,23 @@ async function adminShowPage(id) {
       });
     }
   }
+  if (id === 'rules') await renderRulesPage();
+}
+
+/** The Rules page: the league's tiebreakers, timeouts, foul limits and clock, for every season. */
+async function renderRulesPage() {
+  const content = document.getElementById('rules-content');
+  if (!content) return;
+  const { renderLeagueRules } = await import('./league-rules.js');
+  renderLeagueRules(content, {
+    adminFetch,
+    supabase,
+    config,
+    // The tiebreakers are saved for the season picked at the top.
+    seasonId: window.adminSeasonId,
+    // New tiebreakers reorder the standings, the seeds and everything ranked by them.
+    onSaved: () => { renderAll(true); initAdminOverlays(); },
+  });
 }
 
 /**
@@ -211,8 +231,9 @@ function uploadDeviceGameLogs(games, teams) {
 async function loadAdminSeason(slug) {
   const dataRes = await fetchSeasonData(slug);
   if (dataRes.error || !dataRes.data) return false;
-  const { season, teams, scores, awards, stats, gameStatValues, statDefinitions, sponsorOverrides, sponsors, mediaItems, mediaSlots, contentBlocks, draftBank, draftTeamOrder, scheduleWeekLabels, totalRegGames } = dataRes.data;
-  config.DB = { teams, scores, awards, stats, gameStatValues: gameStatValues || {}, statDefinitions: statDefinitions || [], sponsors: sponsors || [], mediaItems: mediaItems || [], mediaSlots: mediaSlots || {}, contentBlocks: contentBlocks || {}, draftBank: draftBank || [], draftTeamOrder: draftTeamOrder || [], scheduleWeekLabels: scheduleWeekLabels || {}, totalRegGames: totalRegGames || 0 };
+  const { season, teams, scores, awards, stats, gameStatValues, statDefinitions, sponsorOverrides, sponsors, mediaItems, mediaSlots, contentBlocks, draftBank, draftTeamOrder, scheduleWeekLabels, playoffWeeks, totalRegGames } = dataRes.data;
+  // playoffWeeks as the public site has it: without it the standings here counted playoff games.
+  config.DB = { teams, scores, awards, stats, gameStatValues: gameStatValues || {}, statDefinitions: statDefinitions || [], sponsors: sponsors || [], mediaItems: mediaItems || [], mediaSlots: mediaSlots || {}, contentBlocks: contentBlocks || {}, draftBank: draftBank || [], draftTeamOrder: draftTeamOrder || [], scheduleWeekLabels: scheduleWeekLabels || {}, playoffWeeks: playoffWeeks || {}, totalRegGames: totalRegGames || 0 };
   applySponsorOverrides(sponsorOverrides);
   const derived = deriveWeeks(scores, season);
   config.TOTAL_WEEKS = derived.TOTAL_WEEKS;
@@ -248,6 +269,8 @@ async function adminChangeSeason(slug) {
   if (ok) {
     renderAll(true);
     initAdminOverlays();
+    // The rules are league-wide, but the page previews the season's standings.
+    if (document.getElementById('page-rules')?.classList.contains('active')) await renderRulesPage();
   }
   return ok;
 }
